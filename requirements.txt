@@ -1,5 +1,5 @@
 # MeMyselfAI macOS App - Requirements
-# Python 3.10+
+# Python 3.12+
 
 # GUI Framework
 PyQt6==6.6.1
