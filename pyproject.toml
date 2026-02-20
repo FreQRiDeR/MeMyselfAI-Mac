@@ -1,0 +1,9 @@
+[project]
+name = "memyselfai-mac"
+version = "0.1.0"
+description = "An Ai Chat app written in Python"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pyinstaller>=6.19.0",
+]

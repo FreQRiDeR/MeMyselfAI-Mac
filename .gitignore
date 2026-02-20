@@ -10,5 +10,3 @@ wheels/
 .venv
 *.json
 .DS_Store
-pyproject.toml
-uv.lock
