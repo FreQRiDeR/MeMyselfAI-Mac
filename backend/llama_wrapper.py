@@ -58,6 +58,7 @@ class LlamaWrapper:
         
         self.process: Optional[subprocess.Popen] = None
         self.is_generating = False
+        self.current_model: Optional[str] = None  # Track loaded model
         
         if not self.llama_cpp_path.exists():
             raise FileNotFoundError(f"llama.cpp not found at: {llama_cpp_path}")
@@ -91,38 +92,51 @@ class LlamaWrapper:
         if not self.check_model_file(model_path):
             raise FileNotFoundError(f"Model not found: {model_path}")
         
-        # Build command
-        # Check if we're using llama-simple-chat (different args)
-        binary_name = self.llama_cpp_path.name
+        # Check if we need to start/restart process
+        need_new_process = (
+            self.process is None or 
+            self.process.poll() is not None  # Process died/exited
+        )
         
-        if 'simple-chat' in binary_name:
-            # llama-simple-chat uses: -m model [-c context] [-ngl layers]
-            # It reads prompt from stdin
-            cmd = [
-                str(self.llama_cpp_path),
-                '-m', model_path,
-                '-c', str(2048),
-                '-ngl', '0',  # CPU only for now
-            ]
-            use_stdin_prompt = True
-        else:
-            # Standard llama-cli/llama-simple args
-            cmd = [
-                str(self.llama_cpp_path),
-                '--model', model_path,
-                '--prompt', f'User: {prompt}\nAssistant:',
-                '--n-predict', str(max_tokens),
-                '--temp', str(temperature),
-                '--ctx-size', '2048',
-                '--threads', '4',
-                '--log-disable',
-            ]
-            use_stdin_prompt = False
+        if need_new_process and self.process:
+            # Clean up dead process
+            try:
+                self.process.wait(timeout=0.1)
+            except:
+                pass
+            self.process = None
         
-        print(f"🚀 [LlamaWrapper] Running: {' '.join(cmd[:6])}...")
-        
-        try:
-            self.is_generating = True
+        # Start process if needed
+        if self.process is None:
+            # Build command
+            # Check if we're using llama-simple-chat (different args)
+            binary_name = self.llama_cpp_path.name
+            
+            if 'simple-chat' in binary_name:
+                # llama-simple-chat uses: -m model [-c context] [-ngl layers]
+                # It reads prompt from stdin
+                cmd = [
+                    str(self.llama_cpp_path),
+                    '-m', model_path,
+                    '-c', str(2048),
+                    '-ngl', '999',  # 🔥 GPU ENABLED (RX 580)
+                ]
+                use_stdin_prompt = True
+            else:
+                # Standard llama-cli/llama-simple args
+                cmd = [
+                    str(self.llama_cpp_path),
+                    '--model', model_path,
+                    '--prompt', f'User: {prompt}\nAssistant:',
+                    '--n-predict', str(max_tokens),
+                    '--temp', str(temperature),
+                    '--ctx-size', '2048',
+                    '--threads', '4',
+                    '--log-disable',
+                ]
+                use_stdin_prompt = False
+            
+            print(f"🚀 [LlamaWrapper] Starting: {' '.join(cmd[:6])}...")
             
             # Start process
             self.process = subprocess.Popen(
@@ -134,17 +148,25 @@ class LlamaWrapper:
                 bufsize=0
             )
             
+            self.current_model = model_path
+            print("✅ [LlamaWrapper] Process started (model loading...)")
+        else:
+            print("♻️  [LlamaWrapper] Reusing existing process")
+            use_stdin_prompt = 'simple-chat' in self.llama_cpp_path.name
+        
+        # Now generate using the (new or existing) process
+        
+        try:
+            self.is_generating = True
+            
             # If using llama-simple-chat, send prompt via stdin
             if use_stdin_prompt:
                 try:
-                    self.process.stdin.write(f'User: {prompt}\nAssistant:')
+                    self.process.stdin.write(f'{prompt}\n')
                     self.process.stdin.flush()
-                    self.process.stdin.close()
+                    # DON'T close stdin - we need it for next message!
                 except Exception as e:
                     print(f"⚠️  [LlamaWrapper] Failed to write to stdin: {e}")
-            else:
-                # Close stdin for other binaries
-                self.process.stdin.close()
             
             print("📡 [LlamaWrapper] Capturing output...")
             
@@ -197,13 +219,16 @@ class LlamaWrapper:
                 if line.strip().startswith('Bot:'):
                     continue
                 
-                # Skip statistics
+                # Skip statistics  
                 if '[ Prompt:' in line or 't/s ]' in line:
                     break
                 
-                # Skip standalone > markers
-                if line.strip() == '>':
-                    continue
+                # Stop when we see the next prompt (response is complete!)
+                if line.strip() == '>' or line.strip().startswith('> '):
+                    print("📍 [LlamaWrapper] Prompt detected, response complete")
+                    import time
+                    time.sleep(0.1)  # Let process settle
+                    break
                 
                 # CAPTURE EVERYTHING ELSE
                 if line.strip():
@@ -248,22 +273,15 @@ class LlamaWrapper:
                             callback(clean_line)
                         yield clean_line
             
-            # Wait for completion
-            self.process.wait()
-            
-            print(f"\n✅ [LlamaWrapper] Complete (exit code: {self.process.returncode})")
+            # DON'T wait for process to exit - it should stay alive!
+            print(f"✅ [LlamaWrapper] Response complete, process still running")
             
         except Exception as e:
             print(f"❌ [LlamaWrapper] Exception: {e}")
             raise
         finally:
             self.is_generating = False
-            if self.process:
-                try:
-                    self.process.kill()
-                except:
-                    pass
-                self.process = None
+            # DON'T kill process - keep it alive for next message!
     
     def generate(
         self,
@@ -300,7 +318,16 @@ class LlamaWrapper:
                 self.process.kill()
             finally:
                 self.process = None
+                self.current_model = None
                 self.is_generating = False
+    
+    def __del__(self):
+        """Cleanup on deletion"""
+        if self.process:
+            try:
+                self.process.kill()
+            except:
+                pass
 
 
 class ModelInfo:
