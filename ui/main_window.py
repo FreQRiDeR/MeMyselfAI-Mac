@@ -174,7 +174,7 @@ class MainWindow(QMainWindow):
         chat_layout.setContentsMargins(10, 10, 10, 10)
         chat_layout.setSpacing(8)
 
-        # Header row: [☰] centred logo+title [spacer]
+        # Header row: [☰] centred logo+title [gear button]
         header_row = QHBoxLayout()
 
         self.toggle_btn = QPushButton("☰")
@@ -182,10 +182,11 @@ class MainWindow(QMainWindow):
         self.toggle_btn.setToolTip("Toggle chat history")
         self.toggle_btn.setStyleSheet("""
             QPushButton {
-                background: transparent; color: #e009a7;
-                border: none; font-size: 20px; border-radius: 6px;
+                background: #2C2C2E; color: #e009a7;
+                border: 1px solid #3A3A3C; border-radius: 6px;
+                font-size: 20px;
             }
-            QPushButton:hover { background: #2C2C2E; }
+            QPushButton:hover { background: #3A3A3C; border-color: #e009a7; }
         """)
         self.toggle_btn.clicked.connect(self.toggle_history_pane)
         header_row.addWidget(self.toggle_btn, alignment=Qt.AlignmentFlag.AlignTop)
@@ -211,7 +212,22 @@ class MainWindow(QMainWindow):
         center_col.addWidget(title_label)
 
         header_row.addLayout(center_col, stretch=1)
-        header_row.addSpacing(36)   # balance toggle button
+        
+        # Settings gear button (top right)
+        settings_btn = QPushButton("⚙️")
+        settings_btn.setFixedSize(32, 32)
+        settings_btn.setToolTip("Settings")
+        settings_btn.setStyleSheet("""
+            QPushButton {
+                background: #2C2C2E; color: #EBEBF5;
+                border: 1px solid #3A3A3C; border-radius: 6px;
+                font-size: 16px;
+            }
+            QPushButton:hover { background: #3A3A3C; border-color: #e009a7; }
+        """)
+        settings_btn.clicked.connect(self.open_settings)
+        header_row.addWidget(settings_btn, alignment=Qt.AlignmentFlag.AlignTop)
+        
         chat_layout.addLayout(header_row)
 
         chat_layout.addLayout(self.create_top_bar())
@@ -281,12 +297,46 @@ class MainWindow(QMainWindow):
     def create_top_bar(self):
         layout = QHBoxLayout()
         layout.addWidget(QLabel("Model:"))
+        
+        # Model combo box with consistent styling
         self.model_combo = QComboBox()
         self.model_combo.setMinimumWidth(300)
+        self.model_combo.setStyleSheet("""
+            QComboBox {
+                background: #2C2C2E; color: #EBEBF5;
+                border: 1px solid #3A3A3C; border-radius: 6px;
+                padding: 4px 8px; font-size: 12px;
+            }
+            QComboBox:hover {
+                border-color: #e009a7;
+            }
+            QComboBox::drop-down {
+                border: none;
+                border-radius: 6px;
+            }
+            QComboBox QAbstractItemView {
+                background: #2C2C2E;
+                color: #EBEBF5;
+                border: 1px solid #3A3A3C;
+                border-radius: 6px;
+                selection-background-color: #3A3A3C;
+            }
+        """)
         self.model_combo.currentIndexChanged.connect(self.on_model_changed)
         layout.addWidget(self.model_combo, stretch=1)
 
         refresh_btn = QPushButton("🔄 Refresh")
+        refresh_btn.setStyleSheet("""
+            QPushButton {
+                background: #2C2C2E; color: #EBEBF5;
+                border: 1px solid #3A3A3C; border-radius: 6px;
+                padding: 4px 12px; font-size: 12px;
+            }
+            QPushButton:hover { 
+                background: #3A3A3C; 
+                border-color: #e009a7; 
+            }
+        """)
         refresh_btn.clicked.connect(self.refresh_models)
         layout.addWidget(refresh_btn)
 
@@ -299,26 +349,14 @@ class MainWindow(QMainWindow):
                 border: 1px solid #3A3A3C; border-radius: 6px;
                 padding: 4px 10px; font-size: 12px;
             }
-            QPushButton:hover { background: #3A3A3C; border-color: #e009a7; }
+            QPushButton:hover { 
+                background: #3A3A3C; 
+                border-color: #e009a7; 
+            }
         """)
         self.prompt_indicator.clicked.connect(self.open_system_prompts)
         layout.addWidget(self.prompt_indicator)
         self._update_prompt_indicator()
-        
-        # Settings gear button (top right)
-        settings_btn = QPushButton("⚙️")
-        settings_btn.setFixedSize(32, 32)
-        settings_btn.setToolTip("Settings")
-        settings_btn.setStyleSheet("""
-            QPushButton {
-                background: #2C2C2E; color: #EBEBF5;
-                border: 1px solid #3A3A3C; border-radius: 6px;
-                font-size: 16px;
-            }
-            QPushButton:hover { background: #3A3A3C; border-color: #e009a7; }
-        """)
-        settings_btn.clicked.connect(self.open_settings)
-        layout.addWidget(settings_btn)
 
         return layout
 
@@ -335,7 +373,10 @@ class MainWindow(QMainWindow):
                 border: 1px solid #3A3A3C; border-radius: 8px;
                 font-size: 18px; font-weight: bold;
             }
-            QPushButton:hover { background: #3A3A3C; }
+            QPushButton:hover { 
+                background: #3A3A3C; 
+                border-color: #e009a7; 
+            }
         """)
         self.upload_button.clicked.connect(self.open_file_picker)
         layout.addWidget(self.upload_button)
@@ -343,16 +384,53 @@ class MainWindow(QMainWindow):
         self.message_input = QLineEdit()
         self.message_input.setPlaceholderText("Type your message…")
         self.message_input.setFont(QFont("SF Pro", 13))
+        self.message_input.setStyleSheet("""
+            QLineEdit {
+                background: #2C2C2E; 
+                color: #EBEBF5;
+                border: 1px solid #3A3A3C; 
+                border-radius: 6px;
+                padding: 8px 12px;
+                font-size: 13px;
+            }
+            QLineEdit:focus {
+                border-color: #e009a7;
+                outline: none;
+            }
+        """)
         self.message_input.returnPressed.connect(self.send_message)
+
         layout.addWidget(self.message_input, stretch=1)
 
         self.send_button = QPushButton("Send")
         self.send_button.setMinimumWidth(80)
+        self.send_button.setStyleSheet("""
+            QPushButton {
+                background: #2C2C2E; color: #EBEBF5;
+                border: 1px solid #3A3A3C; border-radius: 6px;
+                padding: 6px 12px; font-size: 13px;
+            }
+            QPushButton:hover { 
+                background: #3A3A3C; 
+                border-color: #e009a7; 
+            }
+        """)
         self.send_button.clicked.connect(self.send_message)
         layout.addWidget(self.send_button)
 
         self.stop_button = QPushButton("⏹ Stop")
         self.stop_button.setMinimumWidth(80)
+        self.stop_button.setStyleSheet("""
+            QPushButton {
+                background: #2C2C2E; color: #FF453A;
+                border: 1px solid #3A3A3C; border-radius: 6px;
+                padding: 6px 12px; font-size: 13px;
+            }
+            QPushButton:hover { 
+                background: #3A3A3C; 
+                border-color: #e009a7; 
+            }
+        """)
         self.stop_button.clicked.connect(self.stop_generation)
         self.stop_button.setVisible(False)
         layout.addWidget(self.stop_button)
@@ -445,6 +523,7 @@ class MainWindow(QMainWindow):
 
     # ─── Configuration ────────────────────────
     def load_configuration(self):
+        """Load configuration and initialize backend appropriately"""
         backend_type_str = self.config.get("backend_type", "local")
 
         if not self.config.is_configured():
@@ -454,28 +533,69 @@ class MainWindow(QMainWindow):
             self.open_settings()
             return
 
-        try:
+        # Create backend only if it doesn't exist or type changed
+        backend_needs_update = False
+        
+        if self.backend is None:
+            backend_needs_update = True
+            print("🔧 Creating new backend instance")
+        else:
+            # Check if backend type changed
+            current_type = getattr(self.backend, 'backend_type', None)
+            target_type = {
+                "local": BackendType.LOCAL,
+                "ollama": BackendType.OLLAMA, 
+                "huggingface": BackendType.HUGGINGFACE
+            }.get(backend_type_str)
+            
+            if current_type != target_type:
+                backend_needs_update = True
+                print("🔧 Backend type changed, recreating")
+                
+        if backend_needs_update:
+            try:
+                # Clean up old backend if it exists
+                if self.backend is not None:
+                    print("🧹 Cleaning up old backend")
+                    # Add any cleanup code here if needed
+                    
+                if backend_type_str == "local":
+                    llama_path = self.config.get_llama_cpp_path()
+                    self.backend = UnifiedBackend(BackendType.LOCAL, llama_cpp_path=llama_path)
+                    self.status_bar.showMessage(f"✅ Local backend: {llama_path}")
+                    self.refresh_models()
+
+                elif backend_type_str == "ollama":
+                    ollama_url = self.config.get("ollama_url", "http://localhost:11434")
+                    self.backend = UnifiedBackend(BackendType.OLLAMA, ollama_url=ollama_url)
+                    self.status_bar.showMessage(f"✅ Ollama backend: {ollama_url}")
+                    self.refresh_ollama_models()
+
+                elif backend_type_str == "huggingface":
+                    api_key = self.config.get("hf_api_key", "")
+                    self.backend = UnifiedBackend(BackendType.HUGGINGFACE, api_key=api_key)
+                    self.status_bar.showMessage("✅ HuggingFace backend configured")
+                    self.model_combo.clear()
+                    self.model_combo.addItem("Enter model name (e.g. meta-llama/Llama-2-7b-chat-hf)")
+
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to initialize backend:\n{e}")
+        else:
+            print("🔄 Reusing existing backend instance")
+            # Just refresh UI elements
             if backend_type_str == "local":
                 llama_path = self.config.get_llama_cpp_path()
-                self.backend = UnifiedBackend(BackendType.LOCAL, llama_cpp_path=llama_path)
                 self.status_bar.showMessage(f"✅ Local backend: {llama_path}")
                 self.refresh_models()
-
             elif backend_type_str == "ollama":
                 ollama_url = self.config.get("ollama_url", "http://localhost:11434")
-                self.backend = UnifiedBackend(BackendType.OLLAMA, ollama_url=ollama_url)
                 self.status_bar.showMessage(f"✅ Ollama backend: {ollama_url}")
                 self.refresh_ollama_models()
-
             elif backend_type_str == "huggingface":
-                api_key = self.config.get("hf_api_key", "")
-                self.backend = UnifiedBackend(BackendType.HUGGINGFACE, api_key=api_key)
                 self.status_bar.showMessage("✅ HuggingFace backend configured")
                 self.model_combo.clear()
                 self.model_combo.addItem("Enter model name (e.g. meta-llama/Llama-2-7b-chat-hf)")
 
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to initialize backend:\n{e}")
 
     def refresh_models(self):
         from backend.model_manager import ModelManager

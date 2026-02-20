@@ -42,6 +42,22 @@ class ModelManagerDialog(QDialog):
         
         # Model list
         self.model_list = QListWidget()
+        self.model_list.setStyleSheet("""
+            QListWidget {
+                background: #1C1C1E;
+                border: 1px solid #3A3A3C;
+                border-radius: 6px;
+                color: #EBEBF5;
+            }
+            QListWidget::item {
+                padding: 8px 12px;
+                border-bottom: 1px solid #2C2C2E;
+            }
+            QListWidget::item:selected {
+                background: #3A3A3C;
+                color: #FFFFFF;
+            }
+        """)
         self.model_list.itemSelectionChanged.connect(self.on_selection_changed)
         layout.addWidget(self.model_list)
         
@@ -49,15 +65,54 @@ class ModelManagerDialog(QDialog):
         button_layout = QHBoxLayout()
         
         add_btn = QPushButton("➕ Add Model...")
+        add_btn.setStyleSheet("""
+            QPushButton {
+                background: #2C2C2E; color: #EBEBF5;
+                border: 1px solid #3A3A3C; border-radius: 6px;
+                padding: 6px 12px; font-size: 13px;
+            }
+            QPushButton:hover { 
+                background: #3A3A3C; 
+                border-color: #e009a7; 
+            }
+        """)
         add_btn.clicked.connect(self.add_model)
         button_layout.addWidget(add_btn)
         
         self.rename_btn = QPushButton("✏️ Rename")
+        self.rename_btn.setStyleSheet("""
+            QPushButton {
+                background: #2C2C2E; color: #EBEBF5;
+                border: 1px solid #3A3A3C; border-radius: 6px;
+                padding: 6px 12px; font-size: 13px;
+            }
+            QPushButton:hover { 
+                background: #3A3A3C; 
+                border-color: #e009a7; 
+            }
+            QPushButton:disabled {
+                color: #6C6C6E;
+            }
+        """)
         self.rename_btn.clicked.connect(self.rename_model)
         self.rename_btn.setEnabled(False)
         button_layout.addWidget(self.rename_btn)
         
         self.remove_btn = QPushButton("🗑️ Remove Reference")
+        self.remove_btn.setStyleSheet("""
+            QPushButton {
+                background: #2C2C2E; color: #FF453A;
+                border: 1px solid #3A3A3C; border-radius: 6px;
+                padding: 6px 12px; font-size: 13px;
+            }
+            QPushButton:hover { 
+                background: #3A3A3C; 
+                border-color: #e009a7; 
+            }
+            QPushButton:disabled {
+                color: #6C6C6E;
+            }
+        """)
         self.remove_btn.clicked.connect(self.remove_model)
         self.remove_btn.setEnabled(False)
         button_layout.addWidget(self.remove_btn)
@@ -65,8 +120,20 @@ class ModelManagerDialog(QDialog):
         button_layout.addStretch()
         
         close_btn = QPushButton("Close")
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background: #2C2C2E; color: #EBEBF5;
+                border: 1px solid #3A3A3C; border-radius: 6px;
+                padding: 6px 12px; font-size: 13px;
+            }
+            QPushButton:hover { 
+                background: #3A3A3C; 
+                border-color: #e009a7; 
+            }
+        """)
         close_btn.clicked.connect(self.accept)
         button_layout.addWidget(close_btn)
+
         
         layout.addLayout(button_layout)
     

@@ -1,36 +1,69 @@
 """
 llama_wrapper.py
-Wraps the existing llama.cpp binary for inference
+Wraps the existing llama.cpp binary for inference using llama-server
 """
 
 import sys
 import subprocess
-import threading
-import queue
 import json
+import re
+import time
+import requests
+import threading
 from pathlib import Path
 from typing import Optional, Callable, Generator
 
 
 class LlamaWrapper:
-    """Wrapper around llama.cpp CLI binary"""
+    """Wrapper around llama.cpp server"""
+    
+    # Class variable to track instances (for debugging)
+    _instance_count = 0
     
     def __init__(self, llama_cpp_path: str):
         """
         Initialize the wrapper
         
         Args:
-            llama_cpp_path: Path to llama-cli binary (or 'bundled' to use bundled version)
+            llama_cpp_path: Path to llama-server binary (or 'bundled' to use bundled version)
         """
+        # Track instance creation
+        LlamaWrapper._instance_count += 1
+        self.instance_id = LlamaWrapper._instance_count
+        print(f"🔧 [LlamaWrapper #{self.instance_id}] Creating new instance")
+        
+        # Handle the case where user selected llama-cli instead of llama-server
+        if 'llama-cli' in llama_cpp_path or 'llama-simple-chat' in llama_cpp_path:
+            print(f"⚠️  [LlamaWrapper #{self.instance_id}] Detected llama-cli, converting to llama-server")
+            # Try to find llama-server in the same directory
+            cli_path = Path(llama_cpp_path)
+            server_path = cli_path.parent / 'llama-server'
+            if server_path.exists():
+                llama_cpp_path = str(server_path)
+                print(f"✅ [LlamaWrapper #{self.instance_id}] Using llama-server: {llama_cpp_path}")
+            else:
+                # Fallback: try to find any llama-server
+                possible_server_paths = [
+                    cli_path.parent / 'llama-server',
+                    Path('/Users/terramoda/llama.cpp/build/bin/llama-server'),
+                    Path('./llama-server'),
+                ]
+                for path in possible_server_paths:
+                    if path.exists():
+                        llama_cpp_path = str(path)
+                        print(f"✅ [LlamaWrapper #{self.instance_id}] Found llama-server: {llama_cpp_path}")
+                        break
+        
         # Check if running from PyInstaller bundle and should use bundled version
         if llama_cpp_path == 'bundled' or (hasattr(sys, '_MEIPASS') and not llama_cpp_path):
-            # Running from PyInstaller bundle - look for bundled llama-simple-chat
+            # Running from PyInstaller bundle - look for bundled llama-server
             if hasattr(sys, '_MEIPASS'):
                 # Try multiple possible locations
                 bundle_dir = sys._MEIPASS
                 possible_paths = [
-                    Path(bundle_dir) / 'llama' / 'llama-simple-chat',  # Expected location
-                    Path(bundle_dir) / '../Frameworks/llama/llama-simple-chat',  # Frameworks dir
+                    Path(bundle_dir) / 'llama' / 'llama-server',  # Expected location
+                    Path(bundle_dir) / '../Frameworks/llama' / 'llama-server',  # Frameworks dir
+                    Path(bundle_dir) / 'llama-server',  # Root of bundle
                 ]
                 
                 bundled_path = None
@@ -41,12 +74,12 @@ class LlamaWrapper:
                 
                 if bundled_path:
                     self.llama_cpp_path = bundled_path
-                    print(f"✅ Using bundled llama-simple-chat: {bundled_path}")
+                    print(f"✅ Using bundled llama-server: {bundled_path}")
                 else:
                     # If not found, construct expected path for error message
-                    expected = Path(bundle_dir) / 'llama' / 'llama-simple-chat'
+                    expected = Path(bundle_dir) / 'llama' / 'llama-server'
                     raise FileNotFoundError(
-                        f"Bundled llama-simple-chat not found!\n"
+                        f"Bundled llama-server not found!\n"
                         f"Expected at: {expected}\n"
                         f"Bundle dir: {bundle_dir}\n"
                         f"Also checked: {[str(p) for p in possible_paths]}"
@@ -56,17 +89,154 @@ class LlamaWrapper:
         else:
             self.llama_cpp_path = Path(llama_cpp_path)
         
-        self.process: Optional[subprocess.Popen] = None
+        # Verify it's actually llama-server
+        if 'llama-server' not in str(self.llama_cpp_path):
+            raise ValueError(f"Expected llama-server binary, got: {self.llama_cpp_path}")
+        
+        self.server_process: Optional[subprocess.Popen] = None
+        self.server_port = 8080
         self.is_generating = False
-        self.current_model: Optional[str] = None  # Track loaded model
+        self.current_model: Optional[str] = None
+        self.conversation_history = {}  # Per-model conversation history
+        self.system_prompt = "You are a helpful AI assistant."
+        self.server_ready = False
         
         if not self.llama_cpp_path.exists():
-            raise FileNotFoundError(f"llama.cpp not found at: {llama_cpp_path}")
+            raise FileNotFoundError(f"llama-server not found at: {self.llama_cpp_path}")
+    
+    def set_system_prompt(self, system_prompt: str):
+        """Set the system prompt for the conversation"""
+        print(f"🔧 [LlamaWrapper #{self.instance_id}] Setting system prompt: {system_prompt[:50]}...")
+        self.system_prompt = system_prompt
+        # Clear conversation history when system prompt changes
+        self.conversation_history = {}
     
     def check_model_file(self, model_path: str) -> bool:
         """Check if model file exists and is readable"""
         path = Path(model_path)
         return path.exists() and path.is_file() and path.suffix == '.gguf'
+    
+    def _start_server(self, model_path: str):
+        """Start the llama-server process"""
+        # Check if we already have a server running with the same model
+        if (self.server_process is not None and 
+            self.server_process.poll() is None and  # Process still running
+            self.current_model == model_path and   # Same model
+            self.server_ready):  # Server is ready
+            print(f"♻️  [LlamaWrapper #{self.instance_id}] Reusing existing server (PID: {self.server_process.pid})")
+            return True
+        
+        # Clean up any existing server
+        if self.server_process is not None:
+            print(f"🧹 [LlamaWrapper #{self.instance_id}] Cleaning up old server")
+            self._stop_server()
+        
+        # Find available port
+        self.server_port = self._find_available_port()
+        
+        # Build command for llama-server
+        cmd = [
+            str(self.llama_cpp_path),
+            '-m', model_path,
+            '-c', str(2048),
+            '-ngl', '999',  # GPU ENABLED
+            '--port', str(self.server_port),
+            '--host', '127.0.0.1',
+            '--no-webui'  # Disable web UI to save resources
+        ]
+        
+        print(f"🚀 [LlamaWrapper #{self.instance_id}] Starting server: {' '.join(cmd)}")
+        
+        # Start server process
+        try:
+            self.server_process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+        except Exception as e:
+            print(f"❌ [LlamaWrapper #{self.instance_id}] Failed to start server: {e}")
+            self.server_process = None
+            return False
+        
+        self.current_model = model_path
+        self.server_ready = False
+        
+        # Wait for server to be ready
+        if self._wait_for_server_ready():
+            print(f"✅ [LlamaWrapper #{self.instance_id}] Server started (PID: {self.server_process.pid}) on port {self.server_port}")
+            return True
+        else:
+            print(f"❌ [LlamaWrapper #{self.instance_id}] Server failed to start")
+            # Print stderr to see what went wrong
+            try:
+                stderr_output = self.server_process.stderr.read()
+                if stderr_output:
+                    print(f"stderr: {stderr_output}")
+            except:
+                pass
+            self._stop_server()
+            return False
+    
+    def _find_available_port(self) -> int:
+        """Find an available port for the server"""
+        import socket
+        for port in range(8080, 8100):  # Try ports 8080-8099 first
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.bind(('localhost', port))
+                sock.close()
+                return port
+            except OSError:
+                continue
+        
+        # If those are taken, find any available port
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(('localhost', 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        return port
+    
+    def _wait_for_server_ready(self, timeout: int = 30) -> bool:
+        """Wait for server to be ready"""
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                response = requests.get(f'http://127.0.0.1:{self.server_port}/health', timeout=1)
+                if response.status_code == 200:
+                    self.server_ready = True
+                    return True
+            except:
+                pass
+            time.sleep(0.5)
+        return False
+    
+    def _stop_server(self):
+        """Stop the server process"""
+        if self.server_process:
+            print(f"🛑 [LlamaWrapper #{self.instance_id}] Stopping server (PID: {self.server_process.pid})")
+            try:
+                # Try graceful shutdown first
+                try:
+                    requests.post(f'http://127.0.0.1:{self.server_port}/shutdown', timeout=2)
+                    self.server_process.wait(timeout=2)
+                except:
+                    # Force terminate if graceful shutdown fails
+                    self.server_process.terminate()
+                    try:
+                        self.server_process.wait(timeout=1)
+                    except:
+                        self.server_process.kill()
+                        self.server_process.wait()
+            except Exception as e:
+                print(f"⚠️  [LlamaWrapper #{self.instance_id}] Error stopping server: {e}")
+            finally:
+                self.server_process = None
+                self.current_model = None
+                self.server_ready = False
     
     def generate_streaming(
         self,
@@ -77,7 +247,7 @@ class LlamaWrapper:
         callback: Optional[Callable[[str], None]] = None
     ) -> Generator[str, None, None]:
         """
-        Generate response with streaming output
+        Generate response with streaming output using HTTP API
         
         Args:
             model_path: Path to .gguf model file
@@ -89,199 +259,81 @@ class LlamaWrapper:
         Yields:
             Generated tokens as they arrive
         """
+        print(f"💬 [LlamaWrapper #{self.instance_id}] Generating response for: {prompt[:50]}...")
+        
         if not self.check_model_file(model_path):
             raise FileNotFoundError(f"Model not found: {model_path}")
         
-        # Check if we need to start/restart process
-        need_new_process = (
-            self.process is None or 
-            self.process.poll() is not None  # Process died/exited
-        )
-        
-        if need_new_process and self.process:
-            # Clean up dead process
-            try:
-                self.process.wait(timeout=0.1)
-            except:
-                pass
-            self.process = None
-        
-        # Start process if needed
-        if self.process is None:
-            # Build command
-            # Check if we're using llama-simple-chat (different args)
-            binary_name = self.llama_cpp_path.name
-            
-            if 'simple-chat' in binary_name:
-                # llama-simple-chat uses: -m model [-c context] [-ngl layers]
-                # It reads prompt from stdin
-                cmd = [
-                    str(self.llama_cpp_path),
-                    '-m', model_path,
-                    '-c', str(2048),
-                    '-ngl', '999',  # 🔥 GPU ENABLED (RX 580)
-                ]
-                use_stdin_prompt = True
-            else:
-                # Standard llama-cli/llama-simple args
-                cmd = [
-                    str(self.llama_cpp_path),
-                    '--model', model_path,
-                    '--prompt', f'User: {prompt}\nAssistant:',
-                    '--n-predict', str(max_tokens),
-                    '--temp', str(temperature),
-                    '--ctx-size', '2048',
-                    '--threads', '4',
-                    '--log-disable',
-                ]
-                use_stdin_prompt = False
-            
-            print(f"🚀 [LlamaWrapper] Starting: {' '.join(cmd[:6])}...")
-            
-            # Start process
-            self.process = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=0
-            )
-            
-            self.current_model = model_path
-            print("✅ [LlamaWrapper] Process started (model loading...)")
-        else:
-            print("♻️  [LlamaWrapper] Reusing existing process")
-            use_stdin_prompt = 'simple-chat' in self.llama_cpp_path.name
-        
-        # Now generate using the (new or existing) process
-        
         try:
+            # Start/reuse server
+            if not self._start_server(model_path):
+                raise Exception("Failed to start model server")
+            
             self.is_generating = True
             
-            # If using llama-simple-chat, send prompt via stdin
-            if use_stdin_prompt:
-                try:
-                    self.process.stdin.write(f'{prompt}\n')
-                    self.process.stdin.flush()
-                    # DON'T close stdin - we need it for next message!
-                except Exception as e:
-                    print(f"⚠️  [LlamaWrapper] Failed to write to stdin: {e}")
+            # Prepare messages with conversation history
+            model_key = model_path
+            if model_key not in self.conversation_history:
+                self.conversation_history[model_key] = []
             
-            print("📡 [LlamaWrapper] Capturing output...")
+            # Add system message if not already present
+            messages = []
+            if self.system_prompt:
+                messages.append({"role": "system", "content": self.system_prompt})
             
-            # SIMPLIFIED: Just skip obvious metadata, capture everything else
-            skip_patterns = [
-                'ggml_metal',
-                'llama_model_loader',
-                'llm_load_',
-                'build =',
-                'Loading model',
-                '▄▄',  # ASCII art
-                'available commands',
-                '/exit',
-                '/regen',
-                '<|user|>',
-                '<|assistant|>',
-                '<|system|>',
-                '<|end|>',
-                '<|im_start|>',
-                '<|im_end|>',
-            ]
+            # Add conversation history
+            messages.extend(self.conversation_history[model_key])
             
-            capturing = False
-            last_line = None  # Track last line to avoid duplicates
+            # Add current user message
+            messages.append({"role": "user", "content": prompt})
             
-            for line in iter(self.process.stdout.readline, ''):
-                if not line:
-                    break
-                
-                # Skip metadata lines
-                if any(pattern in line for pattern in skip_patterns):
-                    continue
-                
-                # Skip blank lines at start
-                if not capturing and not line.strip():
-                    continue
-                
-                # Skip lines that are just dots (thinking animation)
-                if line.strip().replace('.', '').strip() == '':
-                    continue
-                
-                # Skip the prompt echo if it's there
-                if 'User:' in line and 'Assistant:' not in line:
-                    continue
-                if line.strip() == 'Assistant:':
-                    capturing = True
-                    continue
-                
-                # Skip Bot: prefix (some models use this)
-                if line.strip().startswith('Bot:'):
-                    continue
-                
-                # Skip statistics  
-                if '[ Prompt:' in line or 't/s ]' in line:
-                    break
-                
-                # Stop when we see the next prompt (response is complete!)
-                if line.strip() == '>' or line.strip().startswith('> '):
-                    print("📍 [LlamaWrapper] Prompt detected, response complete")
-                    import time
-                    time.sleep(0.1)  # Let process settle
-                    break
-                
-                # CAPTURE EVERYTHING ELSE
-                if line.strip():
-                    capturing = True
-                    
-                    # Strip ANSI color codes (like [32m, [33m, [0m)
-                    import re
-                    clean_line = re.sub(r'\x1b\[[0-9;]*m', '', line)
-                    
-                    # Remove leading > if present
-                    clean_line = clean_line.lstrip('> ')
-                    
-                    # Remove chat template tokens
-                    clean_line = clean_line.replace('<|user|>', '')
-                    clean_line = clean_line.replace('<|assistant|>', '')
-                    clean_line = clean_line.replace('<|system|>', '')
-                    clean_line = clean_line.replace('<|end|>', '')
-                    clean_line = clean_line.replace('<|im_start|>', '')
-                    clean_line = clean_line.replace('<|im_end|>', '')
-                    
-                    # Remove "Bot:" prefix if present at start of line
-                    if clean_line.strip().startswith('Bot:'):
-                        clean_line = clean_line.replace('Bot:', '', 1).lstrip()
-                    
-                    # Skip if this line is just a repetition of what's already in last_line
-                    current_stripped = clean_line.strip()
-                    if current_stripped and last_line:
-                        # Skip if this is identical to last line
-                        if current_stripped == last_line:
+            # Make API request
+            url = f'http://127.0.0.1:{self.server_port}/v1/chat/completions'
+            data = {
+                "messages": messages,
+                "stream": True,
+                "max_tokens": max_tokens,
+                "temperature": temperature
+            }
+            
+            response = requests.post(url, json=data, stream=True, timeout=120)
+            response.raise_for_status()
+            
+            full_response = ""
+            
+            # Process streaming response
+            for line in response.iter_lines():
+                if line:
+                    line_str = line.decode('utf-8')
+                    if line_str.startswith('data: '):
+                        data_str = line_str[6:]  # Remove 'data: ' prefix
+                        if data_str.strip() == '[DONE]':
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                            if 'choices' in chunk and len(chunk['choices']) > 0:
+                                delta = chunk['choices'][0].get('delta', {})
+                                content = delta.get('content', '')
+                                if content:
+                                    full_response += content
+                                    if callback:
+                                        callback(content)
+                                    yield content
+                        except json.JSONDecodeError:
                             continue
-                        # Skip if this is just a subset/repeat of what was already said
-                        if current_stripped in last_line or last_line in current_stripped:
-                            # Only skip if they're very similar (one contains the other)
-                            if len(current_stripped) < len(last_line) * 1.5:
-                                continue
-                    
-                    last_line = current_stripped
-                    
-                    # Only yield if there's actual content
-                    if clean_line.strip():
-                        if callback:
-                            callback(clean_line)
-                        yield clean_line
             
-            # DON'T wait for process to exit - it should stay alive!
-            print(f"✅ [LlamaWrapper] Response complete, process still running")
+            # Add to conversation history
+            if full_response:
+                self.conversation_history[model_key].append({"role": "user", "content": prompt})
+                self.conversation_history[model_key].append({"role": "assistant", "content": full_response})
+            
+            print(f"✅ [LlamaWrapper #{self.instance_id}] Response complete ({len(full_response)} chars)")
             
         except Exception as e:
-            print(f"❌ [LlamaWrapper] Exception: {e}")
+            print(f"❌ [LlamaWrapper #{self.instance_id}] Exception during generation: {e}")
             raise
         finally:
             self.is_generating = False
-            # DON'T kill process - keep it alive for next message!
     
     def generate(
         self,
@@ -302,92 +354,31 @@ class LlamaWrapper:
         Returns:
             Complete generated response
         """
-        response = ""
+        print(f"🔄 [LlamaWrapper #{self.instance_id}] Generate (blocking) for: {prompt[:50]}...")
+        response_parts = []
         for token in self.generate_streaming(model_path, prompt, max_tokens, temperature):
-            response += token
-        return response.strip()
+            response_parts.append(token)
+        result = ''.join(response_parts).strip()
+        print(f"✅ [LlamaWrapper #{self.instance_id}] Generate complete ({len(result)} chars)")
+        return result
+    
+    def reset_conversation(self):
+        """Reset the conversation history"""
+        print(f"🔄 [LlamaWrapper #{self.instance_id}] Resetting conversation")
+        self.conversation_history = {}
     
     def stop_generation(self):
         """Stop current generation"""
-        if self.process and self.is_generating:
-            print("🛑 [LlamaWrapper] Stopping generation...")
-            try:
-                self.process.terminate()
-                self.process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-            finally:
-                self.process = None
-                self.current_model = None
-                self.is_generating = False
+        # For HTTP API, we can't really stop a request in progress
+        # But we can mark that we're not interested in the response anymore
+        self.is_generating = False
+    
+    def shutdown(self):
+        """Properly shut down the wrapper"""
+        print(f"🔌 [LlamaWrapper #{self.instance_id}] Shutting down...")
+        self._stop_server()
     
     def __del__(self):
         """Cleanup on deletion"""
-        if self.process:
-            try:
-                self.process.kill()
-            except:
-                pass
-
-
-class ModelInfo:
-    """Information about a model file"""
-    
-    def __init__(self, path: str):
-        self.path = Path(path)
-        self.name = self.path.stem
-        self.size_mb = self.path.stat().st_size / (1024 * 1024)
-        self.full_path = str(self.path.absolute())
-    
-    def __repr__(self):
-        return f"ModelInfo(name='{self.name}', size={self.size_mb:.1f}MB)"
-
-
-def discover_models(models_dir: str) -> list[ModelInfo]:
-    """
-    Discover all .gguf model files in a directory
-    
-    Args:
-        models_dir: Directory to search
-        
-    Returns:
-        List of ModelInfo objects
-    """
-    models_path = Path(models_dir)
-    
-    if not models_path.exists():
-        print(f"⚠️  Models directory not found: {models_dir}")
-        return []
-    
-    models = []
-    for gguf_file in models_path.glob("**/*.gguf"):
-        try:
-            models.append(ModelInfo(str(gguf_file)))
-        except Exception as e:
-            print(f"⚠️  Failed to read model {gguf_file}: {e}")
-    
-    return sorted(models, key=lambda m: m.name)
-
-
-if __name__ == "__main__":
-    # Test the wrapper
-    import sys
-    
-    if len(sys.argv) < 3:
-        print("Usage: python llama_wrapper.py <llama-cli-path> <model-path>")
-        sys.exit(1)
-    
-    wrapper = LlamaWrapper(sys.argv[1])
-    
-    print("Testing llama.cpp wrapper...")
-    print(f"Binary: {wrapper.llama_cpp_path}")
-    print(f"Model: {sys.argv[2]}")
-    print("\nGenerating response...\n")
-    
-    response = wrapper.generate(
-        model_path=sys.argv[2],
-        prompt="What is the capital of France?",
-        max_tokens=50
-    )
-    
-    print(f"\n✅ Response: {response}")
+        print(f"🗑️  [LlamaWrapper #{self.instance_id}] Destructor called")
+        self.shutdown()

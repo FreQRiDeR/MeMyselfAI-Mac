@@ -72,16 +72,16 @@ else:
         
 print("=" * 60 + "\n")
 
-# Bundle llama-simple-chat binary
-# UPDATE THIS PATH to your actual llama-simple-chat location!
-llama_binary_path = '/Users/terramoda/llama.cpp/build/bin/llama-simple-chat'
+# Bundle llama-server binary
+# UPDATE THIS PATH to your actual llama-server location!
+llama_binary_path = '/Users/terramoda/llama.cpp/build/bin/llama-server'
 binaries = []
 
 if Path(llama_binary_path).exists():
     binaries.append((llama_binary_path, 'llama'))
-    print(f"✅ Found llama-simple-chat at: {llama_binary_path}")
+    print(f"✅ Found llama-server at: {llama_binary_path}")
 else:
-    print(f"⚠️  WARNING: llama-simple-chat not found at: {llama_binary_path}")
+    print(f"⚠️  WARNING: llama-server not found at: {llama_binary_path}")
     print(f"   Update the path in MeMyselfAI.spec before building!")
 
 a = Analysis(

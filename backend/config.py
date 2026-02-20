@@ -106,7 +106,7 @@ if __name__ == "__main__":
     config = Config("test_config.json")
     print("Config:", config.config)
     
-    config.set("llama_cpp_path", "/usr/local/bin/llama-cli")
+    config.set("llama_cpp_path", "/usr/local/bin/llama-server")
     print("Updated config:", config.config)
     
     # Cleanup

@@ -206,8 +206,23 @@ class OllamaLibraryTab(QWidget):
         search_layout.addWidget(QLabel("Search:"))
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("Filter models...")
+        self.search_box.setStyleSheet("""
+            QLineEdit {
+                background: #2C2C2E; 
+                color: #EBEBF5;
+                border: 1px solid #3A3A3C; 
+                border-radius: 6px;
+                padding: 6px 8px;
+                font-size: 12px;
+            }
+            QLineEdit:focus {
+                border-color: #e009a7;
+                outline: none;
+            }
+        """)
         self.search_box.textChanged.connect(self.filter_models)
         search_layout.addWidget(self.search_box)
+
         layout.addLayout(search_layout)
         
         # Recommended models
@@ -224,6 +239,22 @@ class OllamaLibraryTab(QWidget):
         
         # Model list
         self.model_list = QListWidget()
+        self.model_list.setStyleSheet("""
+            QListWidget {
+                background: #1C1C1E;
+                border: 1px solid #3A3A3C;
+                border-radius: 6px;
+                color: #EBEBF5;
+            }
+            QListWidget::item {
+                padding: 8px 12px;
+                border-bottom: 1px solid #2C2C2E;
+            }
+            QListWidget::item:selected {
+                background: #3A3A3C;
+                color: #FFFFFF;
+            }
+        """)
         self.model_list.itemDoubleClicked.connect(self.on_model_double_clicked)
         layout.addWidget(self.model_list)
         
@@ -234,10 +265,32 @@ class OllamaLibraryTab(QWidget):
         button_layout = QHBoxLayout()
         
         self.pull_button = QPushButton("Pull Selected Model")
+        self.pull_button.setStyleSheet("""
+            QPushButton {
+                background: #2C2C2E; color: #EBEBF5;
+                border: 1px solid #3A3A3C; border-radius: 6px;
+                padding: 6px 12px; font-size: 13px;
+            }
+            QPushButton:hover { 
+                background: #3A3A3C; 
+                border-color: #e009a7; 
+            }
+        """)
         self.pull_button.clicked.connect(self.pull_selected_model)
         button_layout.addWidget(self.pull_button)
         
         self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setStyleSheet("""
+            QPushButton {
+                background: #2C2C2E; color: #EBEBF5;
+                border: 1px solid #3A3A3C; border-radius: 6px;
+                padding: 6px 12px; font-size: 13px;
+            }
+            QPushButton:hover { 
+                background: #3A3A3C; 
+                border-color: #e009a7; 
+            }
+        """)
         self.cancel_button.clicked.connect(self.cancel_pull)
         self.cancel_button.setVisible(False)
         button_layout.addWidget(self.cancel_button)
@@ -247,6 +300,18 @@ class OllamaLibraryTab(QWidget):
         
         # Progress bar
         self.progress_bar = QProgressBar()
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #3A3A3C;
+                border-radius: 6px;
+                text-align: center;
+                background: #2C2C2E;
+            }
+            QProgressBar::chunk {
+                background-color: #e009a7;
+                border-radius: 4px;
+            }
+        """)
         self.progress_bar.setVisible(False)
         layout.addWidget(self.progress_bar)
         
@@ -415,10 +480,32 @@ class OllamaDownloadedTab(QWidget):
         button_layout = QHBoxLayout()
         
         self.refresh_button = QPushButton("🔄 Refresh")
+        self.refresh_button.setStyleSheet("""
+            QPushButton {
+                background: #2C2C2E; color: #EBEBF5;
+                border: 1px solid #3A3A3C; border-radius: 6px;
+                padding: 6px 12px; font-size: 13px;
+            }
+            QPushButton:hover { 
+                background: #3A3A3C; 
+                border-color: #e009a7; 
+            }
+        """)
         self.refresh_button.clicked.connect(self.refresh_models)
         button_layout.addWidget(self.refresh_button)
         
         self.delete_button = QPushButton("🗑️ Delete Selected")
+        self.delete_button.setStyleSheet("""
+            QPushButton {
+                background: #2C2C2E; color: #FF453A;
+                border: 1px solid #3A3A3C; border-radius: 6px;
+                padding: 6px 12px; font-size: 13px;
+            }
+            QPushButton:hover { 
+                background: #3A3A3C; 
+                border-color: #e009a7; 
+            }
+        """)
         self.delete_button.clicked.connect(self.delete_selected)
         button_layout.addWidget(self.delete_button)
         
@@ -582,6 +669,17 @@ class OllamaManagerDialog(QDialog):
         
         # Close button
         close_button = QPushButton("Close")
+        close_button.setStyleSheet("""
+            QPushButton {
+                background: #2C2C2E; color: #EBEBF5;
+                border: 1px solid #3A3A3C; border-radius: 6px;
+                padding: 6px 12px; font-size: 13px;
+            }
+            QPushButton:hover { 
+                background: #3A3A3C; 
+                border-color: #e009a7; 
+            }
+        """)
         close_button.clicked.connect(self.accept)
         layout.addWidget(close_button)
     

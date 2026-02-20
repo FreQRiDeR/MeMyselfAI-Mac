@@ -37,6 +37,27 @@ class SettingsDialog(QDialog):
         # Backend type selector
         from PyQt6.QtWidgets import QComboBox as QCombo
         self.backend_combo = QCombo()
+        self.backend_combo.setStyleSheet("""
+            QComboBox {
+                background: #2C2C2E; color: #EBEBF5;
+                border: 1px solid #3A3A3C; border-radius: 6px;
+                padding: 4px 8px; font-size: 12px;
+            }
+            QComboBox:hover {
+                border-color: #e009a7;
+            }
+            QComboBox::drop-down {
+                border: none;
+                border-radius: 6px;
+            }
+            QComboBox QAbstractItemView {
+                background: #2C2C2E;
+                color: #EBEBF5;
+                border: 1px solid #3A3A3C;
+                border-radius: 6px;
+                selection-background-color: #3A3A3C;
+            }
+        """)
         self.backend_combo.addItem("Local (llama.cpp)", "local")
         self.backend_combo.addItem("Ollama (Local API)", "ollama")
         self.backend_combo.addItem("HuggingFace (Cloud)", "huggingface")
@@ -47,10 +68,35 @@ class SettingsDialog(QDialog):
         self.llama_label = QLabel("llama.cpp Binary:")
         llama_layout = QHBoxLayout()
         self.llama_path_input = QLineEdit()
-        self.llama_path_input.setPlaceholderText("bundled (or /path/to/llama-simple-chat)")
+        self.llama_path_input.setPlaceholderText("bundled (or /path/to/llama-server)")
+        self.llama_path_input.setStyleSheet("""
+            QLineEdit {
+                background: #2C2C2E; 
+                color: #EBEBF5;
+                border: 1px solid #3A3A3C; 
+                border-radius: 6px;
+                padding: 6px 8px;
+                font-size: 12px;
+            }
+            QLineEdit:focus {
+                border-color: #e009a7;
+                outline: none;
+            }
+        """)
         llama_layout.addWidget(self.llama_path_input)
         
         self.browse_llama_btn = QPushButton("Browse...")
+        self.browse_llama_btn.setStyleSheet("""
+            QPushButton {
+                background: #2C2C2E; color: #EBEBF5;
+                border: 1px solid #3A3A3C; border-radius: 6px;
+                padding: 4px 8px; font-size: 12px;
+            }
+            QPushButton:hover { 
+                background: #3A3A3C; 
+                border-color: #e009a7; 
+            }
+        """)
         self.browse_llama_btn.clicked.connect(self.browse_llama_path)
         llama_layout.addWidget(self.browse_llama_btn)
         
@@ -60,6 +106,20 @@ class SettingsDialog(QDialog):
         self.ollama_label = QLabel("Ollama URL:")
         self.ollama_url_input = QLineEdit()
         self.ollama_url_input.setPlaceholderText("http://localhost:11434")
+        self.ollama_url_input.setStyleSheet("""
+            QLineEdit {
+                background: #2C2C2E; 
+                color: #EBEBF5;
+                border: 1px solid #3A3A3C; 
+                border-radius: 6px;
+                padding: 6px 8px;
+                font-size: 12px;
+            }
+            QLineEdit:focus {
+                border-color: #e009a7;
+                outline: none;
+            }
+        """)
         paths_layout.addRow(self.ollama_label, self.ollama_url_input)
         
         # HuggingFace API Key (for HF backend)
@@ -67,6 +127,20 @@ class SettingsDialog(QDialog):
         self.hf_api_key_input = QLineEdit()
         self.hf_api_key_input.setPlaceholderText("hf_...")
         self.hf_api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.hf_api_key_input.setStyleSheet("""
+            QLineEdit {
+                background: #2C2C2E; 
+                color: #EBEBF5;
+                border: 1px solid #3A3A3C; 
+                border-radius: 6px;
+                padding: 6px 8px;
+                font-size: 12px;
+            }
+            QLineEdit:focus {
+                border-color: #e009a7;
+                outline: none;
+            }
+        """)
         paths_layout.addRow(self.hf_label, self.hf_api_key_input)
         
         # Add note about models
@@ -82,22 +156,106 @@ class SettingsDialog(QDialog):
         params_layout = QFormLayout()
         
         self.max_tokens_input = QSpinBox()
+        self.max_tokens_input.setStyleSheet("""
+            QSpinBox {
+                background: #2C2C2E; 
+                color: #EBEBF5;
+                border: 1px solid #3A3A3C; 
+                border-radius: 6px;
+                padding: 4px 8px;
+                font-size: 12px;
+            }
+            QSpinBox:focus {
+                border-color: #e009a7;
+            }
+            QSpinBox::up-button {
+                border: none;
+                background: #3A3A3C;
+            }
+            QSpinBox::down-button {
+                border: none;
+                background: #3A3A3C;
+            }
+        """)
         self.max_tokens_input.setRange(1, 4096)
         self.max_tokens_input.setSingleStep(64)
         params_layout.addRow("Max Tokens:", self.max_tokens_input)
         
         self.temperature_input = QDoubleSpinBox()
+        self.temperature_input.setStyleSheet("""
+            QDoubleSpinBox {
+                background: #2C2C2E; 
+                color: #EBEBF5;
+                border: 1px solid #3A3A3C; 
+                border-radius: 6px;
+                padding: 4px 8px;
+                font-size: 12px;
+            }
+            QDoubleSpinBox:focus {
+                border-color: #e009a7;
+            }
+            QDoubleSpinBox::up-button {
+                border: none;
+                background: #3A3A3C;
+            }
+            QDoubleSpinBox::down-button {
+                border: none;
+                background: #3A3A3C;
+            }
+        """)
         self.temperature_input.setRange(0.0, 2.0)
         self.temperature_input.setSingleStep(0.1)
         self.temperature_input.setDecimals(2)
         params_layout.addRow("Temperature:", self.temperature_input)
         
         self.context_size_input = QSpinBox()
+        self.context_size_input.setStyleSheet("""
+            QSpinBox {
+                background: #2C2C2E; 
+                color: #EBEBF5;
+                border: 1px solid #3A3A3C; 
+                border-radius: 6px;
+                padding: 4px 8px;
+                font-size: 12px;
+            }
+            QSpinBox:focus {
+                border-color: #e009a7;
+            }
+            QSpinBox::up-button {
+                border: none;
+                background: #3A3A3C;
+            }
+            QSpinBox::down-button {
+                border: none;
+                background: #3A3A3C;
+            }
+        """)
         self.context_size_input.setRange(512, 8192)
         self.context_size_input.setSingleStep(512)
         params_layout.addRow("Context Size:", self.context_size_input)
         
         self.threads_input = QSpinBox()
+        self.threads_input.setStyleSheet("""
+            QSpinBox {
+                background: #2C2C2E; 
+                color: #EBEBF5;
+                border: 1px solid #3A3A3C; 
+                border-radius: 6px;
+                padding: 4px 8px;
+                font-size: 12px;
+            }
+            QSpinBox:focus {
+                border-color: #e009a7;
+            }
+            QSpinBox::up-button {
+                border: none;
+                background: #3A3A3C;
+            }
+            QSpinBox::down-button {
+                border: none;
+                background: #3A3A3C;
+            }
+        """)
         self.threads_input.setRange(1, 16)
         params_layout.addRow("Threads:", self.threads_input)
         
@@ -109,10 +267,48 @@ class SettingsDialog(QDialog):
         appearance_layout = QFormLayout()
         
         self.font_family_input = QFontComboBox()
+        self.font_family_input.setStyleSheet("""
+            QFontComboBox {
+                background: #2C2C2E; 
+                color: #EBEBF5;
+                border: 1px solid #3A3A3C; 
+                border-radius: 6px;
+                padding: 4px 8px;
+                font-size: 12px;
+            }
+            QFontComboBox:focus {
+                border-color: #e009a7;
+            }
+            QFontComboBox::drop-down {
+                border: none;
+                border-radius: 6px;
+            }
+        """)
         self.font_family_input.setCurrentFont(QFont("SF Pro"))
         appearance_layout.addRow("Chat Font:", self.font_family_input)
         
         self.font_size_input = QSpinBox()
+        self.font_size_input.setStyleSheet("""
+            QSpinBox {
+                background: #2C2C2E; 
+                color: #EBEBF5;
+                border: 1px solid #3A3A3C; 
+                border-radius: 6px;
+                padding: 4px 8px;
+                font-size: 12px;
+            }
+            QSpinBox:focus {
+                border-color: #e009a7;
+            }
+            QSpinBox::up-button {
+                border: none;
+                background: #3A3A3C;
+            }
+            QSpinBox::down-button {
+                border: none;
+                background: #3A3A3C;
+            }
+        """)
         self.font_size_input.setRange(8, 24)
         self.font_size_input.setValue(13)
         self.font_size_input.setSuffix(" pt")
@@ -126,6 +322,17 @@ class SettingsDialog(QDialog):
             QDialogButtonBox.StandardButton.Ok | 
             QDialogButtonBox.StandardButton.Cancel
         )
+        button_box.setStyleSheet("""
+            QPushButton {
+                background: #2C2C2E; color: #EBEBF5;
+                border: 1px solid #3A3A3C; border-radius: 6px;
+                padding: 6px 12px; font-size: 13px;
+            }
+            QPushButton:hover { 
+                background: #3A3A3C; 
+                border-color: #e009a7; 
+            }
+        """)
         button_box.accepted.connect(self.save_and_accept)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
@@ -180,7 +387,7 @@ class SettingsDialog(QDialog):
             self,
             "Select llama.cpp Binary",
             "",
-            "Executables (*)"
+            "Executables (*);;llama-server (llama-server)"
         )
         
         if file_path:
@@ -200,8 +407,9 @@ class SettingsDialog(QDialog):
             if not llama_path:
                 QMessageBox.warning(self, "Invalid Settings", "Please specify llama.cpp binary path or use 'bundled'")
                 return False
-            
-            if not Path(llama_path).exists():
+
+            # Check if it's a valid llama binary (server, cli, or simple-chat)
+            if not Path(llama_path).exists() and llama_path != 'bundled':
                 QMessageBox.warning(
                     self,
                     "Invalid Settings",
