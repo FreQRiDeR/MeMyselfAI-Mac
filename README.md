@@ -65,6 +65,15 @@ Start Ollama with 'ollama serve and keep running in background.')
 <div align="center">
              <img src="/window3.png" width="700" />
 
+## System Prompt Manager
+
+- Select, Create and save your System Prompts!
+- Give your models some personality!
+- Custom tailor them for specific tasks!
+
+<div align="center">
+             <img src="/window3.png" width="700" />
+
 ## Troubleshooting
 
 **Model not loading?**
