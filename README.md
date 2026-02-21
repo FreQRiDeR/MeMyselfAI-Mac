@@ -56,8 +56,7 @@ The app stores:
 2. Configure backend, generation parameters.
 3. Select a model from the dropdown
 4. Start chatting!
-(Ollama integration requires Ollama-cli to be running and configured. 
-Start Ollama with 'ollama serve and keep running in background.')
+(Ollama integration now built in and runs in background.)
 
 <div align="center">
              <img src="/window2.png" width="700" />
