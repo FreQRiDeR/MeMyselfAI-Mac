@@ -72,7 +72,7 @@ Start Ollama with 'ollama serve and keep running in background.')
 - Custom tailor them for specific tasks!
 
 <div align="center">
-             <img src="/window3.png" width="700" />
+             <img src="/window4.png" width="700" />
 
 ## Troubleshooting
 
