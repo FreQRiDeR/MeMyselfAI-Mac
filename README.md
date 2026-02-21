@@ -34,7 +34,7 @@ More backends coming soon! (gRPC, WebSockets and HTTP+SSE support is planned)
 ### 3. Add Your Models
 Choose, Configure models in Files/Manage Models. 
 
-### 4. Run
+### 4. Run from code
 ```bash
 python3 main.py
 ```
