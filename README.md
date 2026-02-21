@@ -27,17 +27,12 @@ A native-feeling macOS chat application that wraps llama.cpp build.
 pip3 install -r requirements.txt
 ```
 
-### 2. Configure Your llama.cpp Path
-Edit `config.json` and set:
-```json
-{
-  "llama_cpp_path": "/path/to/your/llama.cpp/build/bin/llama-cli"
-}
-```
+### 2. Choose a Backend
+Select from Local, (llama-server) Ollama, (ollama serve) or HuggingFace. (requires HF API key)
+More backends coming soon! (gRPC, WebSockets and HTTP+SSE support is planned)
 
 ### 3. Add Your Models
-Choose, Configure local models in Files/Manage Models.
-Choose API, backend, and configure generation parameters in MeMyselfAi/Preferences
+Choose, Configure models in Files/Manage Models. 
 
 ### 4. Run
 ```bash
@@ -47,8 +42,9 @@ python3 main.py
 ## Configuration
 
 The app stores:
-- **config.json** - App settings (llama.cpp path, model directory)
+- **config.json** - App settings (backend settings, model directory)
 - **conversation_history.json** - Chat history (optional)
+- **system_prompts** - Manage custom Ai pesonalities!
 
 ## Usage
 
@@ -76,12 +72,11 @@ The app stores:
 ## Troubleshooting
 
 **Model not loading?**
-- Check llama.cpp path in config.json
 - Verify model file exists and is readable
 - Check terminal output for errors
 
 **No response?**
-- Ensure llama.cpp binary works: `./llama-cli --version`
+- Ensure llama.cpp binary works: `./llama-server --version`
 - Check model format is GGUF
 - Try a smaller model first
 
@@ -90,6 +85,5 @@ The app stores:
 - [ ] gRPC/WebSocket/HTTP+SSE support
 - [ ] Multi-model support
 - [ ] Conversation export
-- [ ] System prompt templates
-
+- [ ] System prompt templates (DONE!)
 
