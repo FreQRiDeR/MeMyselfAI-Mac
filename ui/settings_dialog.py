@@ -101,6 +101,44 @@ class SettingsDialog(QDialog):
         llama_layout.addWidget(self.browse_llama_btn)
         
         paths_layout.addRow(self.llama_label, llama_layout)
+
+        # Ollama path (for ollama backend)
+        self.ollama_binary_label = QLabel("Ollama Binary:")
+        ollama_layout = QHBoxLayout()
+        self.ollama_path_input = QLineEdit()
+        self.ollama_path_input.setPlaceholderText("bundled (or /path/to/ollama)")
+        self.ollama_path_input.setStyleSheet("""
+            QLineEdit {
+                background: #2C2C2E; 
+                color: #EBEBF5;
+                border: 1px solid #3A3A3C; 
+                border-radius: 6px;
+                padding: 6px 8px;
+                font-size: 12px;
+            }
+            QLineEdit:focus {
+                border-color: #e009a7;
+                outline: none;
+            }
+        """)
+        ollama_layout.addWidget(self.ollama_path_input)
+        
+        self.browse_ollama_btn = QPushButton("Browse...")
+        self.browse_ollama_btn.setStyleSheet("""
+            QPushButton {
+                background: #2C2C2E; color: #EBEBF5;
+                border: 1px solid #3A3A3C; border-radius: 6px;
+                padding: 4px 8px; font-size: 12px;
+            }
+            QPushButton:hover { 
+                background: #3A3A3C; 
+                border-color: #e009a7; 
+            }
+        """)
+        self.browse_ollama_btn.clicked.connect(self.browse_ollama_path)
+        ollama_layout.addWidget(self.browse_ollama_btn)
+        
+        paths_layout.addRow(self.ollama_binary_label, ollama_layout)
         
         # Ollama URL (for ollama backend)
         self.ollama_label = QLabel("Ollama URL:")
@@ -344,7 +382,8 @@ class SettingsDialog(QDialog):
         index = self.backend_combo.findData(backend_type)
         if index >= 0:
             self.backend_combo.setCurrentIndex(index)
-        
+
+        self.ollama_path_input.setText(self.config.get("ollama_path", ""))
         self.llama_path_input.setText(self.config.get("llama_cpp_path", ""))
         self.ollama_url_input.setText(self.config.get("ollama_url", "http://localhost:11434"))
         self.hf_api_key_input.setText(self.config.get("hf_api_key", ""))
@@ -364,6 +403,11 @@ class SettingsDialog(QDialog):
     def on_backend_changed(self):
         """Handle backend type change - show/hide relevant fields"""
         backend = self.backend_combo.currentData()
+        # Show/hide Ollama binary fields
+        is_ollama = backend == "ollama"
+        self.ollama_binary_label.setVisible(is_ollama)
+        self.ollama_path_input.setVisible(is_ollama)
+        self.browse_ollama_btn.setVisible(is_ollama)
         
         # Show/hide llama.cpp fields
         is_local = backend == "local"
@@ -375,11 +419,18 @@ class SettingsDialog(QDialog):
         is_ollama = backend == "ollama"
         self.ollama_label.setVisible(is_ollama)
         self.ollama_url_input.setVisible(is_ollama)
+
+    def browse_ollama_path(self):
+        """Browse for Ollama binary"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Ollama Binary",
+            "",
+            "Executables (*);;Ollama (ollama)"
+        )
         
-        # Show/hide HuggingFace fields
-        is_hf = backend == "huggingface"
-        self.hf_label.setVisible(is_hf)
-        self.hf_api_key_input.setVisible(is_hf)
+        if file_path:
+            self.ollama_path_input.setText(file_path)
     
     def browse_llama_path(self):
         """Browse for llama.cpp binary"""
@@ -451,6 +502,9 @@ class SettingsDialog(QDialog):
         """Save settings and close dialog"""
         if not self.validate_settings():
             return
+        
+        # Save Ollama path
+        self.config.set("ollama_path", self.ollama_path_input.text().strip())
         
         # Save all settings
         self.config.set("backend_type", self.backend_combo.currentData())

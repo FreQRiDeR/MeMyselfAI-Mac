@@ -6,6 +6,8 @@ Unified backend supporting Local llama.cpp, Ollama, and HuggingFace
 import sys
 import json
 import requests
+import subprocess
+import time
 from enum import Enum
 from typing import Generator, Optional, Callable
 from pathlib import Path
@@ -29,11 +31,12 @@ class UnifiedBackend:
             backend_type: Type of backend to use
             **config: Backend-specific configuration
                 For LOCAL: llama_cpp_path
-                For OLLAMA: ollama_url (default: http://localhost:11434)
+                For OLLAMA: ollama_url (default: http://localhost:11434), ollama_path
                 For HUGGINGFACE: api_key
         """
         self.backend_type = backend_type
         self.config = config
+        self.ollama_process = None  # To track Ollama process
         
         # Initialize backend-specific components
         if backend_type == BackendType.LOCAL:
@@ -42,10 +45,62 @@ class UnifiedBackend:
             self.local_wrapper = LlamaWrapper(llama_path)
         elif backend_type == BackendType.OLLAMA:
             self.ollama_url = config.get('ollama_url', 'http://localhost:11434')
+            self.ollama_path = config.get('ollama_path', 'bundled')
+            self._start_ollama_if_needed()
         elif backend_type == BackendType.HUGGINGFACE:
             self.hf_api_key = config.get('api_key')
             if not self.hf_api_key:
                 raise ValueError("HuggingFace API key required")
+    
+    def _start_ollama_if_needed(self):
+        """Start Ollama serve process if using bundled Ollama"""
+        if self.ollama_path == 'bundled' or (hasattr(sys, '_MEIPASS') and not self.ollama_path):
+            # Don't spawn a new process if Ollama is already responding on the port
+            if self.test_ollama_connection(self.ollama_url):
+                print("ℹ️  Ollama already running, skipping start")
+                return
+
+            ollama_binary = self._find_bundled_ollama()
+            if ollama_binary:
+                try:
+                    print(f"🚀 Starting bundled Ollama: {ollama_binary}")
+                    self.ollama_process = subprocess.Popen(
+                        [str(ollama_binary), 'serve'],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+                    # Wait up to 10s for Ollama to be ready instead of blind sleep
+                    for _ in range(20):
+                        time.sleep(0.5)
+                        if self.test_ollama_connection(self.ollama_url):
+                            print("✅ Ollama started successfully")
+                            return
+                    print("⚠️  Ollama started but not yet responding")
+                except Exception as e:
+                    print(f"⚠️  Failed to start bundled Ollama: {e}")
+    
+    def _find_bundled_ollama(self):
+        """Find bundled Ollama binary"""
+        if hasattr(sys, '_MEIPASS'):
+            # Running from PyInstaller bundle
+            bundle_dir = sys._MEIPASS
+            possible_paths = [
+                Path(bundle_dir) / 'backend' / 'bin' / 'ollama',
+                Path(bundle_dir) / 'ollama',
+                Path(bundle_dir) / '../Frameworks/ollama/ollama',
+            ]
+        else:
+            # Development mode
+            possible_paths = [
+                Path(__file__).parent / 'bin' / 'ollama',
+                Path('./backend/bin/ollama'),
+                Path('./ollama'),
+            ]
+        
+        for path in possible_paths:
+            if path.exists():
+                return path
+        return None
     
     def generate_streaming(
         self,
@@ -53,25 +108,28 @@ class UnifiedBackend:
         prompt: str,
         max_tokens: int = 512,
         temperature: float = 0.7,
-        callback: Optional[Callable[[str], None]] = None
+        callback: Optional[Callable[[str], None]] = None,
+        messages: list = None
     ) -> Generator[str, None, None]:
         """
-        Generate response with streaming
-        
+        Generate response with streaming.
+
         Args:
             model: Model name/path
-            prompt: User prompt
+            prompt: Current user prompt (used by LOCAL and HF backends)
             max_tokens: Maximum tokens to generate
             temperature: Sampling temperature
             callback: Optional callback for each token
-            
+            messages: Full conversation history as [{"role": ..., "content": ...}].
+                      When provided and using Ollama, sent to /api/chat for context.
+
         Yields:
             Generated tokens as they arrive
         """
         if self.backend_type == BackendType.LOCAL:
-            yield from self._local_generate(model, prompt, max_tokens, temperature, callback)
+            yield from self._local_generate(model, prompt, max_tokens, temperature, callback, messages)
         elif self.backend_type == BackendType.OLLAMA:
-            yield from self._ollama_generate(model, prompt, max_tokens, temperature, callback)
+            yield from self._ollama_generate(model, prompt, max_tokens, temperature, callback, messages)
         elif self.backend_type == BackendType.HUGGINGFACE:
             yield from self._hf_generate(model, prompt, max_tokens, temperature, callback)
     
@@ -81,11 +139,12 @@ class UnifiedBackend:
         prompt: str,
         max_tokens: int,
         temperature: float,
-        callback: Optional[Callable[[str], None]]
+        callback: Optional[Callable[[str], None]],
+        messages: list = None
     ) -> Generator[str, None, None]:
         """Generate using local llama.cpp"""
         yield from self.local_wrapper.generate_streaming(
-            model_path, prompt, max_tokens, temperature, callback
+            model_path, prompt, max_tokens, temperature, callback, messages
         )
     
     def _ollama_generate(
@@ -94,15 +153,19 @@ class UnifiedBackend:
         prompt: str,
         max_tokens: int,
         temperature: float,
-        callback: Optional[Callable[[str], None]]
+        callback: Optional[Callable[[str], None]],
+        messages: list = None
     ) -> Generator[str, None, None]:
-        """Generate using Ollama API"""
+        """Generate using Ollama /api/chat with full conversation history"""
         try:
+            # Use provided history, or wrap the bare prompt as a single user turn
+            chat_messages = messages if messages else [{"role": "user", "content": prompt}]
+
             response = requests.post(
-                f'{self.ollama_url}/api/generate',
+                f'{self.ollama_url}/api/chat',
                 json={
                     "model": model,
-                    "prompt": prompt,
+                    "messages": chat_messages,
                     "stream": True,
                     "options": {
                         "num_predict": max_tokens,
@@ -113,20 +176,21 @@ class UnifiedBackend:
                 timeout=60
             )
             response.raise_for_status()
-            
+
             for line in response.iter_lines():
                 if line:
                     try:
                         data = json.loads(line)
                         if not data.get('done', False):
-                            token = data.get('response', '')
+                            # /api/chat returns tokens under message.content
+                            token = data.get('message', {}).get('content', '')
                             if token:
                                 if callback:
                                     callback(token)
                                 yield token
                     except json.JSONDecodeError:
                         continue
-                        
+
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"Ollama API error: {e}")
     
@@ -216,6 +280,29 @@ class UnifiedBackend:
         if self.backend_type == BackendType.LOCAL:
             self.local_wrapper.stop_generation()
         # Ollama and HF don't need explicit stopping (HTTP request ends)
+    
+    def cleanup(self):
+        """Clean up backend resources"""
+        # Clean up LOCAL llama-server process via the wrapper
+        if self.backend_type == BackendType.LOCAL and hasattr(self, 'local_wrapper'):
+            try:
+                self.local_wrapper.cleanup()
+            except Exception as e:
+                print(f"⚠️  llama_wrapper cleanup error: {e}")
+
+        # Clean up bundled Ollama process
+        if self.ollama_process:
+            if self.ollama_process.poll() is None:  # still running
+                print("🛑 Stopping Ollama process...")
+                self.ollama_process.terminate()
+                try:
+                    self.ollama_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    print("⚠️  Ollama didn't terminate cleanly, killing...")
+                    self.ollama_process.kill()
+                    self.ollama_process.wait()
+                print("✅ Ollama stopped")
+            self.ollama_process = None
     
     @staticmethod
     def get_ollama_models(ollama_url: str = 'http://localhost:11434') -> list:

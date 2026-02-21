@@ -30,7 +30,7 @@ class GenerationThread(QThread):
     generation_complete = pyqtSignal()
     generation_error    = pyqtSignal(str)
 
-    def __init__(self, backend, model, prompt, max_tokens, temperature, system_prompt=""):
+    def __init__(self, backend, model, prompt, max_tokens, temperature, system_prompt="", messages=None):
         super().__init__()
         self.backend       = backend
         self.model         = model
@@ -38,6 +38,7 @@ class GenerationThread(QThread):
         self.max_tokens    = max_tokens
         self.temperature   = temperature
         self.system_prompt = system_prompt
+        self.messages      = messages
 
     def run(self):
         try:
@@ -45,7 +46,8 @@ class GenerationThread(QThread):
             if self.system_prompt:
                 full_prompt = f"[SYSTEM]: {self.system_prompt}\n\n[USER]: {self.prompt}"
             for token in self.backend.generate_streaming(
-                self.model, full_prompt, self.max_tokens, self.temperature
+                self.model, full_prompt, self.max_tokens, self.temperature,
+                messages=self.messages
             ):
                 self.token_generated.emit(token)
             self.generation_complete.emit()
@@ -435,6 +437,27 @@ class MainWindow(QMainWindow):
         self.stop_button.setVisible(False)
         layout.addWidget(self.stop_button)
         return layout
+    
+    def closeEvent(self, event):
+        """Clean up when closing the application"""
+        # Stop any in-flight generation first so the process isn't mid-use during cleanup
+        if self.generation_thread and self.generation_thread.isRunning():
+            print("🛑 Stopping generation thread...")
+            if self.backend:
+                try:
+                    self.backend.stop_generation()
+                except Exception:
+                    pass
+            self.generation_thread.quit()
+            self.generation_thread.wait(3000)  # 3s timeout
+
+        if self.backend:
+            try:
+                self.backend.cleanup()
+            except Exception as e:
+                print(f"⚠️  Cleanup error: {e}")
+        super().closeEvent(event)
+    
 
     # ─── History pane ─────────────────────────
     def toggle_history_pane(self):
@@ -557,7 +580,11 @@ class MainWindow(QMainWindow):
                 # Clean up old backend if it exists
                 if self.backend is not None:
                     print("🧹 Cleaning up old backend")
-                    # Add any cleanup code here if needed
+                    try:
+                        self.backend.cleanup()
+                    except Exception as e:
+                        print(f"⚠️  Cleanup warning: {e}")
+                    self.backend = None
                     
                 if backend_type_str == "local":
                     llama_path = self.config.get_llama_cpp_path()
@@ -726,11 +753,22 @@ class MainWindow(QMainWindow):
         
         self.append_message("Assistant", "", "#34C759")
 
+        # Build full messages list for Ollama /api/chat so the model has conversation history
+        system_prompt_text = self.prompt_manager.active.prompt
+        messages = []
+        if system_prompt_text:
+            messages.append({"role": "system", "content": system_prompt_text})
+        if self.current_conversation:
+            for msg in self.current_conversation.messages:
+                messages.append({"role": msg.role, "content": msg.content})
+        messages.append({"role": "user", "content": full_prompt})
+
         self.generation_thread = GenerationThread(
             self.backend, self.current_model, full_prompt,
             self.config.get("max_tokens", 512),
             self.config.get("temperature", 0.7),
-            self.prompt_manager.active.prompt
+            system_prompt_text,
+            messages=messages
         )
         self.generation_thread.token_generated.connect(self.on_token_generated)
         self.generation_thread.generation_complete.connect(self.on_generation_complete)

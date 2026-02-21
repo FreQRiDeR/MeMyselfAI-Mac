@@ -97,19 +97,10 @@ class LlamaWrapper:
         self.server_port = 8080
         self.is_generating = False
         self.current_model: Optional[str] = None
-        self.conversation_history = {}  # Per-model conversation history
-        self.system_prompt = "You are a helpful AI assistant."
         self.server_ready = False
         
         if not self.llama_cpp_path.exists():
             raise FileNotFoundError(f"llama-server not found at: {self.llama_cpp_path}")
-    
-    def set_system_prompt(self, system_prompt: str):
-        """Set the system prompt for the conversation"""
-        print(f"🔧 [LlamaWrapper #{self.instance_id}] Setting system prompt: {system_prompt[:50]}...")
-        self.system_prompt = system_prompt
-        # Clear conversation history when system prompt changes
-        self.conversation_history = {}
     
     def check_model_file(self, model_path: str) -> bool:
         """Check if model file exists and is readable"""
@@ -244,69 +235,57 @@ class LlamaWrapper:
         prompt: str,
         max_tokens: int = 512,
         temperature: float = 0.7,
-        callback: Optional[Callable[[str], None]] = None
+        callback: Optional[Callable[[str], None]] = None,
+        messages: list = None
     ) -> Generator[str, None, None]:
         """
-        Generate response with streaming output using HTTP API
-        
+        Generate response with streaming output using HTTP API.
+        History is managed by the caller (main_window) and passed in via messages.
+
         Args:
             model_path: Path to .gguf model file
-            prompt: User prompt
+            prompt: Current user prompt (used as fallback if messages is None)
             max_tokens: Maximum tokens to generate
             temperature: Sampling temperature
             callback: Optional callback for each token
-            
+            messages: Full conversation history from main_window. If None,
+                      falls back to a bare single-turn user prompt.
+
         Yields:
             Generated tokens as they arrive
         """
         print(f"💬 [LlamaWrapper #{self.instance_id}] Generating response for: {prompt[:50]}...")
-        
+
         if not self.check_model_file(model_path):
             raise FileNotFoundError(f"Model not found: {model_path}")
-        
+
         try:
-            # Start/reuse server
             if not self._start_server(model_path):
                 raise Exception("Failed to start model server")
-            
+
             self.is_generating = True
-            
-            # Prepare messages with conversation history
-            model_key = model_path
-            if model_key not in self.conversation_history:
-                self.conversation_history[model_key] = []
-            
-            # Add system message if not already present
-            messages = []
-            if self.system_prompt:
-                messages.append({"role": "system", "content": self.system_prompt})
-            
-            # Add conversation history
-            messages.extend(self.conversation_history[model_key])
-            
-            # Add current user message
-            messages.append({"role": "user", "content": prompt})
-            
-            # Make API request
+
+            # Use caller-supplied history; fall back to bare prompt if not provided
+            chat_messages = messages if messages else [{"role": "user", "content": prompt}]
+
             url = f'http://127.0.0.1:{self.server_port}/v1/chat/completions'
-            data = {
-                "messages": messages,
+            payload = {
+                "messages": chat_messages,
                 "stream": True,
                 "max_tokens": max_tokens,
                 "temperature": temperature
             }
-            
-            response = requests.post(url, json=data, stream=True, timeout=120)
+
+            response = requests.post(url, json=payload, stream=True, timeout=120)
             response.raise_for_status()
-            
+
             full_response = ""
-            
-            # Process streaming response
+
             for line in response.iter_lines():
                 if line:
                     line_str = line.decode('utf-8')
                     if line_str.startswith('data: '):
-                        data_str = line_str[6:]  # Remove 'data: ' prefix
+                        data_str = line_str[6:]
                         if data_str.strip() == '[DONE]':
                             break
                         try:
@@ -321,14 +300,9 @@ class LlamaWrapper:
                                     yield content
                         except json.JSONDecodeError:
                             continue
-            
-            # Add to conversation history
-            if full_response:
-                self.conversation_history[model_key].append({"role": "user", "content": prompt})
-                self.conversation_history[model_key].append({"role": "assistant", "content": full_response})
-            
+
             print(f"✅ [LlamaWrapper #{self.instance_id}] Response complete ({len(full_response)} chars)")
-            
+
         except Exception as e:
             print(f"❌ [LlamaWrapper #{self.instance_id}] Exception during generation: {e}")
             raise
@@ -362,17 +336,16 @@ class LlamaWrapper:
         print(f"✅ [LlamaWrapper #{self.instance_id}] Generate complete ({len(result)} chars)")
         return result
     
-    def reset_conversation(self):
-        """Reset the conversation history"""
-        print(f"🔄 [LlamaWrapper #{self.instance_id}] Resetting conversation")
-        self.conversation_history = {}
-    
     def stop_generation(self):
         """Stop current generation"""
         # For HTTP API, we can't really stop a request in progress
         # But we can mark that we're not interested in the response anymore
         self.is_generating = False
     
+    def cleanup(self):
+        """Clean up resources — called by UnifiedBackend on backend switch or app quit"""
+        self.shutdown()
+
     def shutdown(self):
         """Properly shut down the wrapper"""
         print(f"🔌 [LlamaWrapper #{self.instance_id}] Shutting down...")

@@ -18,6 +18,7 @@ class Config:
     DEFAULT_CONFIG = {
         "backend_type": "local",  # local, ollama, or huggingface
         "llama_cpp_path": "bundled" if _is_bundled else "",
+        "ollama_path": "bundled" if _is_bundled else "",  # Add this line
         "ollama_url": "http://localhost:11434",
         "hf_api_key": "",
         "default_model": "",
@@ -95,10 +96,26 @@ class Config:
             return path
         return None
     
+    def get_ollama_path(self) -> Optional[str]:
+        """Get Ollama binary path"""
+        path = self.config.get("ollama_path")
+        # Allow 'bundled' as a valid value
+        if path == 'bundled':
+            return 'bundled'
+        if path and Path(path).exists():
+            return path
+        return None
+    
     def is_configured(self) -> bool:
         """Check if app is properly configured"""
-        # Just need llama.cpp path (models are managed separately)
-        return self.get_llama_cpp_path() is not None
+        # For local backend, need llama.cpp path; for Ollama, need Ollama path
+        backend_type = self.config.get("backend_type", "local")
+        if backend_type == "local":
+            return self.get_llama_cpp_path() is not None
+        elif backend_type == "ollama":
+            return self.get_ollama_path() is not None
+        else:  # huggingface
+            return True  # Only need API key
 
 
 if __name__ == "__main__":

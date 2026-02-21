@@ -11,12 +11,17 @@ backend_files = [
     ('backend/llama_wrapper.py', 'backend'),
     ('backend/config.py', 'backend'),
     ('backend/model_manager.py', 'backend'),
+    ('backend/unified_backend.py', 'backend'),
+    ('backend/chat_history.py', 'backend'),
+    ('backend/system_prompts.py', 'backend'),
 ]
 
 ui_files = [
     ('ui/main_window.py', 'ui'),
     ('ui/settings_dialog.py', 'ui'),
     ('ui/model_manager_dialog.py', 'ui'),
+    ('ui/ollama_manager_dialog.py', 'ui'),
+    ('ui/system_prompts_dialog.py', 'ui'),
 ]
 
 # Include logo if it exists
@@ -72,17 +77,24 @@ else:
         
 print("=" * 60 + "\n")
 
-# Bundle llama-server binary
-# UPDATE THIS PATH to your actual llama-server location!
-llama_binary_path = '/Users/terramoda/llama.cpp/build/bin/llama-server'
+# Bundle binaries - paths are relative to the project root
 binaries = []
 
+llama_binary_path = 'backend/bin/llama-server'
 if Path(llama_binary_path).exists():
-    binaries.append((llama_binary_path, 'llama'))
+    # Destination 'backend/bin' matches _find_bundled_ollama()'s search path
+    binaries.append((llama_binary_path, 'backend/bin'))
     print(f"✅ Found llama-server at: {llama_binary_path}")
 else:
     print(f"⚠️  WARNING: llama-server not found at: {llama_binary_path}")
-    print(f"   Update the path in MeMyselfAI.spec before building!")
+
+ollama_binary_path = 'backend/bin/ollama'
+if Path(ollama_binary_path).exists():
+    binaries.append((ollama_binary_path, 'backend/bin'))
+    print(f"✅ Found ollama at: {ollama_binary_path}")
+else:
+    print(f"⚠️  WARNING: ollama not found at: {ollama_binary_path}")
+
 
 a = Analysis(
     ['main.py'],
