@@ -312,9 +312,21 @@ class MainWindow(QMainWindow):
             QComboBox:hover {
                 border-color: #e009a7;
             }
+
             QComboBox::drop-down {
                 border: none;
-                border-radius: 6px;
+                width: 20px;
+                border-left: 1px solid #3A3A3C;
+            }
+            QComboBox::drop-down:hover {
+                background: #3A3A3C;
+                border-left: 1px solid #e009a7;
+            }
+            QComboBox::down-arrow {
+                width: 8px; height: 5px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #e009a7;
             }
             QComboBox QAbstractItemView {
                 background: #2C2C2E;

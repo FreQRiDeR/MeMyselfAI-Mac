@@ -48,7 +48,19 @@ class SettingsDialog(QDialog):
             }
             QComboBox::drop-down {
                 border: none;
-                border-radius: 6px;
+                width: 20px;
+                border-left: 1px solid #3A3A3C;
+            }
+            QComboBox::drop-down:hover {
+                background: #3A3A3C;
+                border-left: 1px solid #e009a7;
+            }
+            QComboBox::down-arrow {
+                width: 8px;
+                height: 5px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #e009a7;
             }
             QComboBox QAbstractItemView {
                 background: #2C2C2E;
@@ -209,10 +221,26 @@ class SettingsDialog(QDialog):
             QSpinBox::up-button {
                 border: none;
                 background: #3A3A3C;
+                width: 16px;
             }
+            QSpinBox::up-button:hover { background: #48484A; border-left: 1px solid #e009a7; }
             QSpinBox::down-button {
                 border: none;
                 background: #3A3A3C;
+                width: 16px;
+            }
+            QSpinBox::down-button:hover { background: #48484A; border-left: 1px solid #e009a7; }
+            QSpinBox::up-arrow {
+                width: 8px; height: 5px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-bottom: 5px solid #e009a7;
+            }
+            QSpinBox::down-arrow {
+                width: 8px; height: 5px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #e009a7;
             }
         """)
         self.max_tokens_input.setRange(1, 4096)
@@ -235,10 +263,26 @@ class SettingsDialog(QDialog):
             QDoubleSpinBox::up-button {
                 border: none;
                 background: #3A3A3C;
+                width: 16px;
             }
+            QDoubleSpinBox::up-button:hover { background: #48484A; border-left: 1px solid #e009a7; }
             QDoubleSpinBox::down-button {
                 border: none;
                 background: #3A3A3C;
+                width: 16px;
+            }
+            QDoubleSpinBox::down-button:hover { background: #48484A; border-left: 1px solid #e009a7; }
+            QDoubleSpinBox::up-arrow {
+                width: 8px; height: 5px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-bottom: 5px solid #e009a7;
+            }
+            QDoubleSpinBox::down-arrow {
+                width: 8px; height: 5px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #e009a7;
             }
         """)
         self.temperature_input.setRange(0.0, 2.0)
@@ -262,10 +306,26 @@ class SettingsDialog(QDialog):
             QSpinBox::up-button {
                 border: none;
                 background: #3A3A3C;
+                width: 16px;
             }
+            QSpinBox::up-button:hover { background: #48484A; border-left: 1px solid #e009a7; }
             QSpinBox::down-button {
                 border: none;
                 background: #3A3A3C;
+                width: 16px;
+            }
+            QSpinBox::down-button:hover { background: #48484A; border-left: 1px solid #e009a7; }
+            QSpinBox::up-arrow {
+                width: 8px; height: 5px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-bottom: 5px solid #e009a7;
+            }
+            QSpinBox::down-arrow {
+                width: 8px; height: 5px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #e009a7;
             }
         """)
         self.context_size_input.setRange(512, 8192)
@@ -288,10 +348,26 @@ class SettingsDialog(QDialog):
             QSpinBox::up-button {
                 border: none;
                 background: #3A3A3C;
+                width: 16px;
             }
+            QSpinBox::up-button:hover { background: #48484A; border-left: 1px solid #e009a7; }
             QSpinBox::down-button {
                 border: none;
                 background: #3A3A3C;
+                width: 16px;
+            }
+            QSpinBox::down-button:hover { background: #48484A; border-left: 1px solid #e009a7; }
+            QSpinBox::up-arrow {
+                width: 8px; height: 5px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-bottom: 5px solid #e009a7;
+            }
+            QSpinBox::down-arrow {
+                width: 8px; height: 5px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #e009a7;
             }
         """)
         self.threads_input.setRange(1, 16)
@@ -319,7 +395,19 @@ class SettingsDialog(QDialog):
             }
             QFontComboBox::drop-down {
                 border: none;
-                border-radius: 6px;
+                width: 20px;
+                border-left: 1px solid #3A3A3C;
+            }
+            QFontComboBox::drop-down:hover {
+                background: #3A3A3C;
+                border-left: 1px solid #e009a7;
+            }
+            QFontComboBox::down-arrow {
+                width: 8px;
+                height: 5px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #e009a7;
             }
         """)
         self.font_family_input.setCurrentFont(QFont("SF Pro"))
@@ -341,10 +429,26 @@ class SettingsDialog(QDialog):
             QSpinBox::up-button {
                 border: none;
                 background: #3A3A3C;
+                width: 16px;
             }
+            QSpinBox::up-button:hover { background: #48484A; border-left: 1px solid #e009a7; }
             QSpinBox::down-button {
                 border: none;
                 background: #3A3A3C;
+                width: 16px;
+            }
+            QSpinBox::down-button:hover { background: #48484A; border-left: 1px solid #e009a7; }
+            QSpinBox::up-arrow {
+                width: 8px; height: 5px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-bottom: 5px solid #e009a7;
+            }
+            QSpinBox::down-arrow {
+                width: 8px; height: 5px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #e009a7;
             }
         """)
         self.font_size_input.setRange(8, 24)

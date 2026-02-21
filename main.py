@@ -23,6 +23,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("MeMyselfAI")
     app.setOrganizationName("MeMyselfAI")
+    app.setStyle("Fusion")  # Ensures stylesheet arrow/button subcontrols render correctly on macOS
     
     # Set macOS-specific attributes
     if sys.platform == "darwin":
