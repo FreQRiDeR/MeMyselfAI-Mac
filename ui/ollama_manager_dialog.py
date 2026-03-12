@@ -14,6 +14,7 @@ from PyQt6.QtGui import QFont
 import requests
 import json
 from typing import List, Dict, Optional
+from backend.unified_backend import UnifiedBackend
 
 
 class ModelPullThread(QThread):
@@ -22,10 +23,11 @@ class ModelPullThread(QThread):
     progress = pyqtSignal(str, int, int)  # status, completed, total
     finished = pyqtSignal(bool, str)  # success, message
     
-    def __init__(self, ollama_url: str, model_name: str):
+    def __init__(self, ollama_url: str, model_name: str, ollama_api_key: str = ""):
         super().__init__()
         self.ollama_url = ollama_url
         self.model_name = model_name
+        self.ollama_api_key = ollama_api_key
         self._stop = False
     
     def run(self):
@@ -33,6 +35,7 @@ class ModelPullThread(QThread):
         try:
             response = requests.post(
                 f'{self.ollama_url}/api/pull',
+                headers=UnifiedBackend._ollama_headers(self.ollama_api_key),
                 json={"name": self.model_name},
                 stream=True,
                 timeout=None
@@ -191,9 +194,10 @@ class OllamaLibraryTab(QWidget):
         }
     ]
     
-    def __init__(self, ollama_url: str, parent=None):
+    def __init__(self, ollama_url: str, ollama_api_key: str = "", parent=None):
         super().__init__(parent)
         self.ollama_url = ollama_url
+        self.ollama_api_key = ollama_api_key
         self.pull_thread = None
         self.init_ui()
     
@@ -416,7 +420,7 @@ class OllamaLibraryTab(QWidget):
         status_msg = f"Adding {model_name}..." if is_cloud else f"Downloading {model_name}..."
         self.status_label.setText(status_msg)
         
-        self.pull_thread = ModelPullThread(self.ollama_url, model_name)
+        self.pull_thread = ModelPullThread(self.ollama_url, model_name, self.ollama_api_key)
         self.pull_thread.progress.connect(self.on_pull_progress)
         self.pull_thread.finished.connect(self.on_pull_finished)
         self.pull_thread.start()
@@ -458,9 +462,10 @@ class OllamaLibraryTab(QWidget):
 class OllamaDownloadedTab(QWidget):
     """Tab for managing downloaded models"""
     
-    def __init__(self, ollama_url: str, parent=None):
+    def __init__(self, ollama_url: str, ollama_api_key: str = "", parent=None):
         super().__init__(parent)
         self.ollama_url = ollama_url
+        self.ollama_api_key = ollama_api_key
         self.init_ui()
     
     def init_ui(self):
@@ -526,7 +531,13 @@ class OllamaDownloadedTab(QWidget):
         self.status_label.setText("Loading...")
         
         try:
-            response = requests.get(f'{self.ollama_url}/api/tags', timeout=5)
+            response = requests.get(
+                f'{self.ollama_url}/api/tags',
+                headers=UnifiedBackend._ollama_headers(self.ollama_api_key),
+                timeout=5
+            )
+            if response.status_code == 401:
+                raise RuntimeError("Ollama requires an API key. Set it in Settings.")
             response.raise_for_status()
             data = response.json()
             
@@ -615,6 +626,7 @@ class OllamaDownloadedTab(QWidget):
         try:
             response = requests.delete(
                 f'{self.ollama_url}/api/delete',
+                headers=UnifiedBackend._ollama_headers(self.ollama_api_key),
                 json={"name": model_name},
                 timeout=10
             )
@@ -631,9 +643,10 @@ class OllamaDownloadedTab(QWidget):
 class OllamaManagerDialog(QDialog):
     """Main Ollama Model Manager dialog"""
     
-    def __init__(self, ollama_url: str = 'http://localhost:11434', parent=None):
+    def __init__(self, ollama_url: str = 'http://localhost:11434', ollama_api_key: str = "", parent=None):
         super().__init__(parent)
         self.ollama_url = ollama_url
+        self.ollama_api_key = ollama_api_key
         self.init_ui()
     
     def init_ui(self):
@@ -658,11 +671,11 @@ class OllamaManagerDialog(QDialog):
         tabs = QTabWidget()
         
         # Library tab
-        self.library_tab = OllamaLibraryTab(self.ollama_url, self)
+        self.library_tab = OllamaLibraryTab(self.ollama_url, self.ollama_api_key, self)
         tabs.addTab(self.library_tab, "📚 Model Library")
         
         # Downloaded tab
-        self.downloaded_tab = OllamaDownloadedTab(self.ollama_url, self)
+        self.downloaded_tab = OllamaDownloadedTab(self.ollama_url, self.ollama_api_key, self)
         tabs.addTab(self.downloaded_tab, "💾 Downloaded")
         
         layout.addWidget(tabs)
@@ -686,10 +699,17 @@ class OllamaManagerDialog(QDialog):
     def check_ollama_status(self):
         """Check if Ollama is running"""
         try:
-            response = requests.get(f'{self.ollama_url}/api/tags', timeout=2)
+            response = requests.get(
+                f'{self.ollama_url}/api/tags',
+                headers=UnifiedBackend._ollama_headers(self.ollama_api_key),
+                timeout=2
+            )
             if response.status_code == 200:
                 self.status_label.setText(f"✅ Connected to Ollama at {self.ollama_url}")
                 self.status_label.setStyleSheet("color: green;")
+            elif response.status_code == 401:
+                self.status_label.setText(f"🔐 Ollama at {self.ollama_url} requires authentication")
+                self.status_label.setStyleSheet("color: #FF9F0A;")
             else:
                 self.show_ollama_error()
         except:

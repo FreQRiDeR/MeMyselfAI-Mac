@@ -10,8 +10,10 @@ from PyQt6.QtWidgets import (
     QListWidgetItem, QFrame, QFileDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QPropertyAnimation, QEasingCurve
-from PyQt6.QtGui import QAction, QFont, QTextCursor, QPixmap, QKeySequence, QShortcut
+from PyQt6.QtGui import QAction, QColor, QFont, QTextCharFormat, QTextCursor, QPixmap, QKeySequence, QShortcut
 import sys
+import base64
+import mimetypes
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -64,6 +66,7 @@ class GenerationThread(QThread):
 class MainWindow(QMainWindow):
 
     HISTORY_WIDTH = 240
+    IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tif', '.tiff'}
 
     def __init__(self):
         super().__init__()
@@ -607,6 +610,7 @@ class MainWindow(QMainWindow):
                 "ollama",
                 self.config.get("ollama_url", "http://localhost:11434"),
                 self.config.get("ollama_path", "bundled"),
+                self.config.get("ollama_api_key", ""),
                 self.config.get("inference_timeout", 300),
             )
         if backend_type_str == "huggingface":
@@ -671,10 +675,12 @@ class MainWindow(QMainWindow):
                 elif backend_type_str == "ollama":
                     ollama_url = self.config.get("ollama_url", "http://localhost:11434")
                     ollama_path = self.config.get("ollama_path", "bundled")
+                    ollama_api_key = self.config.get("ollama_api_key", "")
                     self.backend = UnifiedBackend(
                         BackendType.OLLAMA,
                         ollama_url=ollama_url,
                         ollama_path=ollama_path,
+                        ollama_api_key=ollama_api_key,
                         inference_timeout=self.config.get("inference_timeout", 300),
                     )
                     self.status_bar.showMessage(f"✅ Ollama backend: {ollama_url}")
@@ -727,35 +733,97 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"Found {len(models)} model(s)")
 
     def refresh_ollama_models(self):
+        from backend.unified_backend import UnifiedBackend
         import requests
         ollama_url = self.config.get("ollama_url", "http://localhost:11434")
+        ollama_api_key = self.config.get("ollama_api_key", "")
+        local_models = []
+        cloud_models = []
+        errors = []
+
         try:
-            r = requests.get(f'{ollama_url}/api/tags', timeout=5)
+            r = requests.get(
+                UnifiedBackend._ollama_api_url(ollama_url, 'tags'),
+                timeout=5
+            )
             r.raise_for_status()
-            models = r.json().get('models', [])
-            self.model_combo.clear()
-            if not models:
-                self.model_combo.addItem("No models – use File → Manage Models to download")
-                self.status_bar.showMessage("⚠️  No Ollama models downloaded")
-                return
-            for m in models:
-                name = m.get('name', 'unknown')
-                size = m.get('size', 0)
-                is_cloud = size == 0 or 'cloud' in name.lower()
-                label = f"☁️ {name} (Cloud)" if is_cloud else f"💾 {name} ({size/(1024*1024):.0f}MB)"
-                self.model_combo.addItem(label, name)
-            cloud = sum(1 for m in models if m.get('size', 0) == 0 or 'cloud' in m.get('name', '').lower())
-            self.status_bar.showMessage(
-                f"Found {len(models)} Ollama model(s) – {cloud} cloud, {len(models)-cloud} local")
+            for model in r.json().get('models', []):
+                name = model.get('name', 'unknown')
+                if model.get('remote_host') or UnifiedBackend._is_cloud_model_name(name):
+                    continue
+                local_models.append({
+                    "label": f"💾 {name} ({model.get('size', 0)/(1024*1024):.0f}MB)",
+                    "data": {
+                        "route": "local",
+                        "request_model": name,
+                        "display_name": name,
+                    }
+                })
         except Exception as e:
-            self.model_combo.clear()
-            self.model_combo.addItem("Error connecting to Ollama")
-            self.status_bar.showMessage(f"❌ Ollama error: {e}")
+            errors.append(f"local: {e}")
+
+        if ollama_api_key:
+            try:
+                r = requests.get(
+                    UnifiedBackend._ollama_api_url(UnifiedBackend.OLLAMA_CLOUD_URL, 'tags'),
+                    headers=UnifiedBackend._ollama_headers(ollama_api_key),
+                    timeout=5
+                )
+                if r.status_code == 401:
+                    raise RuntimeError("invalid Ollama API key")
+                r.raise_for_status()
+                for model in r.json().get('models', []):
+                    name = model.get('name', 'unknown')
+                    cloud_models.append({
+                        "label": f"☁️ {name} (Cloud)",
+                        "data": {
+                            "route": "cloud",
+                            "request_model": name,
+                            "display_name": name,
+                        }
+                    })
+            except Exception as e:
+                errors.append(f"cloud: {e}")
+
+        self.model_combo.clear()
+        all_models = local_models + cloud_models
+        if not all_models:
+            self.model_combo.addItem("No Ollama models available")
+            if errors:
+                self.status_bar.showMessage(f"❌ Ollama error: {' | '.join(errors)}")
+            elif not ollama_api_key:
+                self.status_bar.showMessage("⚠️  No local models. Add an Ollama API key for cloud models.")
+            else:
+                self.status_bar.showMessage("⚠️  No Ollama models available")
+            return
+
+        for entry in all_models:
+            self.model_combo.addItem(entry["label"], entry["data"])
+
+        self.status_bar.showMessage(
+            f"Found {len(all_models)} Ollama model(s) – {len(cloud_models)} cloud, {len(local_models)} local"
+        )
+
+    def _current_model_label(self) -> str:
+        if isinstance(self.current_model, dict):
+            return self.current_model.get("display_name") or self.current_model.get("request_model") or ""
+        return self.current_model or ""
 
     def on_model_changed(self, index):
         if index >= 0:
+            previous_model = self.current_model
             self.current_model = self.model_combo.itemData(index)
             if self.current_model:
+                # On local backend, restart + warmup when the model changes.
+                if (
+                    self.current_model != previous_model
+                    and self.backend
+                    and getattr(self.backend, "backend_type", None) == BackendType.LOCAL
+                ):
+                    if self.generation_thread and self.generation_thread.isRunning():
+                        self.backend.stop_generation()
+                    self.status_bar.showMessage("Switching model… warming up")
+                    self.backend.preload_model(self.current_model)
                 self.status_bar.showMessage(f"Selected: {self.model_combo.currentText()}")
 
     # ─── File Upload ──────────────────────────
@@ -788,6 +856,67 @@ class MainWindow(QMainWindow):
         self.attached_files.clear()
         self.message_input.setPlaceholderText("Type your message…")
 
+    @classmethod
+    def _is_image_attachment(cls, filepath: str) -> bool:
+        return Path(filepath).suffix.lower() in cls.IMAGE_EXTENSIONS
+
+    @staticmethod
+    def _looks_binary(sample: bytes) -> bool:
+        if not sample:
+            return False
+        if b'\x00' in sample:
+            return True
+        control_bytes = sum(1 for b in sample if b < 32 and b not in (9, 10, 13))
+        return (control_bytes / len(sample)) > 0.30
+
+    @classmethod
+    def _read_attachment_text(cls, filepath: str, max_chars: int = 10000, max_bytes: int = 50000):
+        try:
+            with open(filepath, 'rb') as f:
+                raw = f.read(max_bytes + 1)
+        except Exception as exc:
+            return "", f"Error reading file: {exc}"
+
+        truncated = len(raw) > max_bytes
+        if truncated:
+            raw = raw[:max_bytes]
+
+        if cls._looks_binary(raw[:4096]):
+            return "", "Binary file omitted (not plain text)"
+
+        text = raw.decode('utf-8', errors='replace')
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n\n[... truncated ...]"
+        elif truncated:
+            text += "\n\n[... truncated ...]"
+        return text, None
+
+    @staticmethod
+    def _guess_image_mime_type(filepath: str) -> str:
+        mime_type, _ = mimetypes.guess_type(filepath)
+        if mime_type and mime_type.startswith('image/'):
+            return mime_type
+        suffix = Path(filepath).suffix.lower()
+        if suffix in {'.jpg', '.jpeg'}:
+            return 'image/jpeg'
+        if suffix == '.png':
+            return 'image/png'
+        if suffix == '.webp':
+            return 'image/webp'
+        if suffix == '.gif':
+            return 'image/gif'
+        if suffix in {'.tif', '.tiff'}:
+            return 'image/tiff'
+        if suffix == '.bmp':
+            return 'image/bmp'
+        return 'image/jpeg'
+
+    @classmethod
+    def _image_to_data_url(cls, filepath: str) -> str:
+        image_bytes = Path(filepath).read_bytes()
+        encoded = base64.b64encode(image_bytes).decode('ascii')
+        return f"data:{cls._guess_image_mime_type(filepath)};base64,{encoded}"
+
     # ─── Messaging ────────────────────────────
     def send_message(self):
         message = self.message_input.text().strip()
@@ -805,7 +934,7 @@ class MainWindow(QMainWindow):
 
         # Start fresh conversation if needed
         if self.current_conversation is None:
-            self.current_conversation = Conversation(model=self.current_model)
+            self.current_conversation = Conversation(model=self._current_model_label())
 
         self._current_response = ""
         self.message_input.setEnabled(False)
@@ -822,23 +951,42 @@ class MainWindow(QMainWindow):
         self.append_message("You", display_msg, "#007AFF")
         self.message_input.clear()
         
-        # Prepare prompt with file CONTENTS
+        # Prepare prompt with file contents and optional image payloads.
         full_prompt = message if message else "Please analyze the attached files:"
-        
+        ollama_images = []
+        llama_image_urls = []
+        attachment_sections = []
+
         if self.attached_files:
-            full_prompt += "\n\n"
             for filepath in self.attached_files:
                 filename = Path(filepath).name
-                try:
-                    # Try to read as text
-                    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read()
-                        # Limit each file to ~10k chars to avoid token limits
-                        if len(content) > 10000:
-                            content = content[:10000] + "\n\n[... truncated ...]"
-                        full_prompt += f"\n--- File: {filename} ---\n{content}\n"
-                except Exception as e:
-                    full_prompt += f"\n--- File: {filename} ---\n[Error reading file: {e}]\n"
+                if self._is_image_attachment(filepath):
+                    attachment_sections.append(f"[Image attached: {filename}]")
+                    if self.backend.backend_type == BackendType.OLLAMA:
+                        try:
+                            image_bytes = Path(filepath).read_bytes()
+                            ollama_images.append(base64.b64encode(image_bytes).decode('ascii'))
+                        except Exception as exc:
+                            attachment_sections[-1] = (
+                                f"[Image attached: {filename} (failed to load: {exc})]"
+                            )
+                    elif self.backend.backend_type == BackendType.LOCAL:
+                        try:
+                            llama_image_urls.append(self._image_to_data_url(filepath))
+                        except Exception as exc:
+                            attachment_sections[-1] = (
+                                f"[Image attached: {filename} (failed to load: {exc})]"
+                            )
+                    continue
+
+                content, error = self._read_attachment_text(filepath)
+                if error:
+                    attachment_sections.append(f"--- File: {filename} ---\n[{error}]")
+                else:
+                    attachment_sections.append(f"--- File: {filename} ---\n{content}")
+
+            if attachment_sections:
+                full_prompt += "\n\n" + "\n\n".join(attachment_sections)
         
         self.append_message("Assistant", "", "#34C759")
 
@@ -850,7 +998,20 @@ class MainWindow(QMainWindow):
         if self.current_conversation:
             for msg in self.current_conversation.messages:
                 messages.append({"role": msg.role, "content": msg.content})
-        messages.append({"role": "user", "content": full_prompt})
+        user_message = {"role": "user", "content": full_prompt}
+        if ollama_images and self.backend.backend_type == BackendType.OLLAMA:
+            user_message["images"] = ollama_images
+        elif llama_image_urls and self.backend.backend_type == BackendType.LOCAL:
+            content_parts = [{"type": "text", "text": full_prompt}]
+            for image_url in llama_image_urls:
+                content_parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_url},
+                    }
+                )
+            user_message["content"] = content_parts
+        messages.append(user_message)
 
         self.generation_thread = GenerationThread(
             self.backend, self.current_model, full_prompt,
@@ -887,11 +1048,12 @@ class MainWindow(QMainWindow):
         generation_tps = stats.get("generation_tps")
         if prompt_tps is not None and generation_tps is not None:
             cursor.insertText("\n")
-            # Keep default font family/size; only colorize.
-            cursor.insertHtml(
-                f'<span style="color:#8B5CF6;">'
-                f'[ Prompt: {prompt_tps:.1f} t/s | Generation: {generation_tps:.1f} t/s ]'
-                f'</span>'
+            stats_format = QTextCharFormat()
+            stats_format.setForeground(QColor("#8B5CF6"))
+            stats_format.setFont(QFont("SF Pro", 13))
+            cursor.insertText(
+                f"[ Prompt: {prompt_tps:.1f} t/s | Generation: {generation_tps:.1f} t/s ]",
+                stats_format
             )
         cursor.insertText("\n")
         self.chat_display.setTextCursor(cursor)
@@ -982,7 +1144,10 @@ class MainWindow(QMainWindow):
         if backend_type == "ollama":
             from ui.ollama_manager_dialog import OllamaManagerDialog
             dialog = OllamaManagerDialog(
-                self.config.get("ollama_url", "http://localhost:11434"), self)
+                self.config.get("ollama_url", "http://localhost:11434"),
+                self.config.get("ollama_api_key", ""),
+                self
+            )
             dialog.exec()
             self.refresh_ollama_models()
         else:

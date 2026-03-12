@@ -81,7 +81,7 @@ print("=" * 60 + "\n")
 # Bundle binaries - paths are relative to the project root
 binaries = []
 
-llama_binary_path = 'backend/bin/llama-server'
+llama_binary_path = 'backend/bin/macos/llama-server'
 if Path(llama_binary_path).exists():
     # Destination 'backend/bin' matches _find_bundled_ollama()'s search path
     binaries.append((llama_binary_path, 'backend/bin'))
@@ -89,7 +89,7 @@ if Path(llama_binary_path).exists():
 else:
     print(f"⚠️  WARNING: llama-server not found at: {llama_binary_path}")
 
-ollama_binary_path = 'backend/bin/ollama'
+ollama_binary_path = 'backend/bin/macos/ollama'
 if Path(ollama_binary_path).exists():
     binaries.append((ollama_binary_path, 'backend/bin'))
     print(f"✅ Found ollama at: {ollama_binary_path}")

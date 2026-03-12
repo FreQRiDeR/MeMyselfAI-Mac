@@ -11,6 +11,7 @@ import shlex
 import time
 import requests
 import threading
+import os
 from pathlib import Path
 from typing import Optional, Callable, Generator
 
@@ -149,6 +150,8 @@ class LlamaWrapper:
         self.server_process: Optional[subprocess.Popen] = None
         self.server_port = 8080
         self.is_generating = False
+        self.stop_requested = False
+        self._active_response = None
         self.current_model: Optional[str] = None
         self.server_ready = False
         self.last_generation_stats = {}
@@ -199,46 +202,72 @@ class LlamaWrapper:
             '--no-webui',
         ])
         return cmd
+
+    def _build_server_env(self):
+        """Build environment for launching llama-server with bundled shared libraries."""
+        env = dict(os.environ)
+        binary_dir = str(self.llama_cpp_path.parent.resolve())
+
+        if sys.platform.startswith("linux"):
+            existing = env.get("LD_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = (
+                f"{binary_dir}{os.pathsep}{existing}" if existing else binary_dir
+            )
+        elif sys.platform == "darwin":
+            existing = env.get("DYLD_LIBRARY_PATH", "")
+            env["DYLD_LIBRARY_PATH"] = (
+                f"{binary_dir}{os.pathsep}{existing}" if existing else binary_dir
+            )
+            # Only relevant on macOS builds with Metal support.
+            env.setdefault("GGML_METAL_FULL_OFFLOAD", "0")
+
+        return env
     
     def _start_server(self, model_path: str):
         """Start the llama-server process"""
+        self.stop_requested = False
         # Check if we already have a server running with the same model
-        if (self.server_process is not None and 
+        if (self.server_process is not None and
             self.server_process.poll() is None and  # Process still running
-            self.current_model == model_path and   # Same model
-            self.server_ready):  # Server is ready
-            print(f"♻️  [LlamaWrapper #{self.instance_id}] Reusing existing server (PID: {self.server_process.pid})")
-            return True
+            self.current_model == model_path):      # Same model
+            # If server_ready was cleared, re-check health before tearing down.
+            if not self.server_ready:
+                try:
+                    response = requests.get(f'http://127.0.0.1:{self.server_port}/health', timeout=1)
+                    if response.status_code == 200:
+                        self.server_ready = True
+                except Exception:
+                    pass
+            if self.server_ready:
+                print(f"♻️  [LlamaWrapper #{self.instance_id}] Reusing existing server (PID: {self.server_process.pid})")
+                return True
         
         # Clean up any existing server
         if self.server_process is not None:
             print(f"🧹 [LlamaWrapper #{self.instance_id}] Cleaning up old server")
             self._stop_server()
         
-        # Find available port
-        self.server_port = self._find_available_port()
+        # Always bind to the expected port (app assumes 8080)
+        self.server_port = 8080
+        if not self._ensure_port_free(self.server_port, wait_seconds=5.0):
+            raise RuntimeError(f"llama-server port {self.server_port} is still in use")
         
         # Build command for llama-server
         cmd = self._build_server_command(model_path)
         
         print(f"🚀 [LlamaWrapper #{self.instance_id}] Starting server: {' '.join(cmd)}")
         
-        # Start server process with Metal/GPU env vars
-        import os
-        gpu_env = {
-            **os.environ,
-            'LLAMA_METAL': '0',          # Enable Metal backend
-            'GGML_METAL_FULL_OFFLOAD': '0',  # Offload all layers to GPU
-        }
+        launch_env = self._build_server_env()
         try:
             self.server_process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                bufsize=1,
+                bufsize=0,
                 universal_newlines=True,
-                env=gpu_env
+                env=launch_env,
+                cwd=str(self.llama_cpp_path.parent),
             )
         except Exception as e:
             print(f"❌ [LlamaWrapper #{self.instance_id}] Failed to start server: {e}")
@@ -254,34 +283,167 @@ class LlamaWrapper:
             return True
         else:
             print(f"❌ [LlamaWrapper #{self.instance_id}] Server failed to start")
-            # Print stderr to see what went wrong
             try:
-                stderr_output = self.server_process.stderr.read()
-                if stderr_output:
-                    print(f"stderr: {stderr_output}")
-            except:
+                if self.server_process.poll() is not None:
+                    _, stderr_output = self.server_process.communicate(timeout=1)
+                    if stderr_output:
+                        print(f"stderr: {stderr_output.strip()}")
+                    print(
+                        f"❌ [LlamaWrapper #{self.instance_id}] "
+                        f"llama-server exited with code {self.server_process.returncode}"
+                    )
+                elif self.server_process.stderr is not None:
+                    stderr_output = self.server_process.stderr.read()
+                    if stderr_output:
+                        print(f"stderr: {stderr_output.strip()}")
+            except Exception:
                 pass
             self._stop_server()
             return False
     
-    def _find_available_port(self) -> int:
-        """Find an available port for the server"""
+    def _is_port_free(self, port: int) -> bool:
         import socket
-        for port in range(8080, 8100):  # Try ports 8080-8099 first
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.bind(('localhost', port))
-                sock.close()
-                return port
-            except OSError:
-                continue
-        
-        # If those are taken, find any available port
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(('localhost', 0))
-        port = sock.getsockname()[1]
-        sock.close()
-        return port
+        try:
+            sock.bind(('127.0.0.1', port))
+            return True
+        except OSError:
+            return False
+        finally:
+            sock.close()
+
+    def _ensure_port_free(self, port: int, wait_seconds: float = 3.0) -> bool:
+        if self._is_port_free(port):
+            return True
+
+        print(f"⚠️  [LlamaWrapper #{self.instance_id}] Port {port} is in use; attempting cleanup")
+        # Try graceful shutdown on any existing server listening there.
+        try:
+            requests.post(f'http://127.0.0.1:{port}/shutdown', timeout=1)
+        except Exception:
+            pass
+
+        # If we own a process, terminate it.
+        if self.server_process and self.server_process.poll() is None:
+            try:
+                self.server_process.terminate()
+                self.server_process.wait(timeout=1)
+            except Exception:
+                try:
+                    self.server_process.kill()
+                    self.server_process.wait(timeout=1)
+                except Exception:
+                    pass
+
+        # Wait for port release.
+        deadline = time.time() + wait_seconds
+        while time.time() < deadline:
+            if self._is_port_free(port):
+                return True
+            time.sleep(0.1)
+
+        if self._is_port_free(port):
+            return True
+
+        # Last resort: kill any llama-server still holding the port.
+        if self._kill_port_holder(port):
+            time.sleep(0.2)
+            return self._is_port_free(port)
+
+        # Fallback: kill any remaining llama-server processes (port detection may fail).
+        if self._kill_all_llama_servers():
+            time.sleep(0.2)
+            return self._is_port_free(port)
+
+        return self._is_port_free(port)
+
+    def _kill_port_holder(self, port: int) -> bool:
+        """Best-effort kill of a llama-server process holding the given port."""
+        pids = []
+        try:
+            import shutil
+            if shutil.which("lsof"):
+                result = subprocess.run(
+                    ["lsof", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+                pids = [int(p) for p in result.stdout.split() if p.strip().isdigit()]
+            elif shutil.which("ss"):
+                result = subprocess.run(
+                    ["ss", "-lptn", f"sport = :{port}"],
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+                for line in result.stdout.splitlines():
+                    if "pid=" in line:
+                        # Extract pid=1234
+                        parts = line.split("pid=")[1].split(",", 1)
+                        pid_str = parts[0].strip()
+                        if pid_str.isdigit():
+                            pids.append(int(pid_str))
+        except Exception:
+            pids = []
+
+        if not pids:
+            return False
+
+        killed = False
+        for pid in pids:
+            try:
+                cmdline_path = Path(f"/proc/{pid}/cmdline")
+                if cmdline_path.exists():
+                    cmdline = cmdline_path.read_text(errors="ignore")
+                    if "llama-server" not in cmdline:
+                        continue
+                # Terminate then kill if needed.
+                os.kill(pid, 15)
+                time.sleep(0.2)
+                try:
+                    os.kill(pid, 0)
+                    os.kill(pid, 9)
+                except Exception:
+                    pass
+                killed = True
+            except Exception:
+                continue
+        return killed
+
+    def _kill_all_llama_servers(self) -> bool:
+        """Kill any llama-server processes (best-effort)."""
+        pids = []
+        try:
+            for entry in os.listdir("/proc"):
+                if not entry.isdigit():
+                    continue
+                cmdline_path = Path(f"/proc/{entry}/cmdline")
+                if not cmdline_path.exists():
+                    continue
+                cmdline = cmdline_path.read_text(errors="ignore")
+                if "llama-server" in cmdline:
+                    pids.append(int(entry))
+        except Exception:
+            return False
+
+        if not pids:
+            return False
+
+        killed = False
+        for pid in pids:
+            try:
+                os.kill(pid, 15)
+                time.sleep(0.1)
+                try:
+                    os.kill(pid, 0)
+                    os.kill(pid, 9)
+                except Exception:
+                    pass
+                killed = True
+            except Exception:
+                continue
+        return killed
     
     def _wait_for_server_ready(self, timeout: int = 30) -> bool:
         """Wait for server to be ready"""
@@ -317,9 +479,21 @@ class LlamaWrapper:
             except Exception as e:
                 print(f"⚠️  [LlamaWrapper #{self.instance_id}] Error stopping server: {e}")
             finally:
+                # Ensure the process is actually gone
+                try:
+                    if self.server_process and self.server_process.poll() is None:
+                        deadline = time.time() + 5.0
+                        while time.time() < deadline and self.server_process.poll() is None:
+                            time.sleep(0.1)
+                        if self.server_process.poll() is None:
+                            self.server_process.kill()
+                except Exception:
+                    pass
                 self.server_process = None
                 self.current_model = None
                 self.server_ready = False
+                # Wait for port to be released (shutdown can be slow)
+                self._ensure_port_free(self.server_port, wait_seconds=5.0)
     
     def generate_streaming(
         self,
@@ -362,18 +536,33 @@ class LlamaWrapper:
 
             # Use caller-supplied history; fall back to bare prompt if not provided
             chat_messages = messages if messages else [{"role": "user", "content": prompt}]
+            chat_messages = self._trim_messages(chat_messages, self.context_size, max_tokens)
 
             url = f'http://127.0.0.1:{self.server_port}/v1/chat/completions'
+            # Clamp output tokens to leave room for prompt in context.
+            prompt_reserve = 128
+            effective_max_tokens = max(
+                1,
+                min(max_tokens, self.context_size - prompt_reserve)
+            )
+            if effective_max_tokens != max_tokens:
+                print(
+                    f"⚠️  [LlamaWrapper #{self.instance_id}] "
+                    f"Clamping max_tokens {max_tokens} -> {effective_max_tokens} "
+                    f"(context_size={self.context_size})"
+                )
+
             payload = {
                 "messages": chat_messages,
                 "stream": True,
-                "max_tokens": max_tokens,
+                "max_tokens": effective_max_tokens,
                 "temperature": temperature,
                 # Ask for token usage in the final streaming chunk when supported.
                 "stream_options": {"include_usage": True},
             }
 
             response = requests.post(url, json=payload, stream=True, timeout=self.request_timeout)
+            self._active_response = response
             response.raise_for_status()
 
             full_response = ""
@@ -447,9 +636,17 @@ class LlamaWrapper:
 
         except Exception as e:
             print(f"❌ [LlamaWrapper #{self.instance_id}] Exception during generation: {e}")
+            if self.stop_requested:
+                return
             raise
         finally:
             self.is_generating = False
+            if self._active_response is not None:
+                try:
+                    self._active_response.close()
+                except Exception:
+                    pass
+                self._active_response = None
 
     def get_last_generation_stats(self) -> dict:
         """Return stats from the most recent streamed generation."""
@@ -486,7 +683,80 @@ class LlamaWrapper:
         """Stop current generation"""
         # For HTTP API, we can't really stop a request in progress
         # But we can mark that we're not interested in the response anymore
+        self.stop_requested = True
         self.is_generating = False
+        if self._active_response is not None:
+            try:
+                self._active_response.close()
+            except Exception:
+                pass
+            self._active_response = None
+        self._stop_server()
+
+    def preload_model(self, model_path: str) -> bool:
+        """Stop current server, start with the new model, and run a tiny warmup."""
+        try:
+            # Always restart to ensure a clean switch.
+            if self.server_process is not None:
+                self._stop_server()
+            # Give the OS time to release the port, then retry start a few times.
+            if not self._ensure_port_free(self.server_port, wait_seconds=8.0):
+                raise RuntimeError(f"llama-server port {self.server_port} is still in use")
+
+            for attempt in range(3):
+                if self._start_server(model_path):
+                    break
+                if attempt < 2:
+                    time.sleep(0.5)
+            if self.server_process is None or self.server_process.poll() is not None:
+                return False
+
+            # Warmup: tiny non-streaming request to load weights.
+            url = f'http://127.0.0.1:{self.server_port}/v1/chat/completions'
+            payload = {
+                "messages": [{"role": "user", "content": "warmup"}],
+                "stream": False,
+                "max_tokens": 1,
+                "temperature": 0.0,
+            }
+            try:
+                requests.post(url, json=payload, timeout=min(15, self.request_timeout))
+            except Exception:
+                # Warmup is best-effort; ignore failures.
+                pass
+            return True
+        except Exception as e:
+            print(f"⚠️  [LlamaWrapper #{self.instance_id}] Preload failed: {e}")
+            return False
+
+    def _trim_messages(self, messages, context_size: int, max_tokens: int):
+        """
+        Approximate trim to fit within context window.
+        Estimate 1 token ~= 4 chars and preserve system prompt when present.
+        """
+        if not messages:
+            return messages
+        budget_tokens = max(256, context_size - max_tokens)
+        budget_chars = budget_tokens * 4
+
+        trimmed = []
+        start_idx = 0
+        if messages[0].get("role") == "system":
+            trimmed.append(messages[0])
+            start_idx = 1
+            budget_chars -= len(messages[0].get("content", ""))
+
+        for msg in reversed(messages[start_idx:]):
+            content = msg.get("content", "")
+            cost = len(content)
+            if budget_chars - cost < 0:
+                break
+            trimmed.append(msg)
+            budget_chars -= cost
+
+        if start_idx == 1:
+            return [messages[0]] + list(reversed(trimmed[1:]))
+        return list(reversed(trimmed))
     
     def cleanup(self):
         """Clean up resources — called by UnifiedBackend on backend switch or app quit"""

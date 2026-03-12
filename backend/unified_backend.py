@@ -22,6 +22,8 @@ class BackendType(Enum):
 
 class UnifiedBackend:
     """Unified interface for multiple LLM backends"""
+
+    OLLAMA_CLOUD_URL = 'https://ollama.com/api'
     
     def __init__(self, backend_type: BackendType, **config):
         """
@@ -38,6 +40,7 @@ class UnifiedBackend:
         self.config = config
         self.inference_timeout = int(config.get('inference_timeout', 300))
         self.ollama_process = None  # To track Ollama process
+        self.last_generation_stats = {}
         
         # Initialize backend-specific components
         if backend_type == BackendType.LOCAL:
@@ -47,11 +50,67 @@ class UnifiedBackend:
         elif backend_type == BackendType.OLLAMA:
             self.ollama_url = config.get('ollama_url', 'http://localhost:11434')
             self.ollama_path = config.get('ollama_path', 'bundled')
+            self.ollama_api_key = str(config.get('ollama_api_key', '')).strip()
+            self.ollama_cloud_url = config.get('ollama_cloud_url', self.OLLAMA_CLOUD_URL)
             self._start_ollama_if_needed()
         elif backend_type == BackendType.HUGGINGFACE:
             self.hf_api_key = config.get('api_key')
             if not self.hf_api_key:
                 raise ValueError("HuggingFace API key required")
+
+    @staticmethod
+    def _ollama_headers(api_key: str = "") -> dict:
+        headers = {}
+        api_key = str(api_key).strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        return headers
+
+    @staticmethod
+    def _ollama_api_url(base_url: str, path: str) -> str:
+        base = str(base_url).rstrip('/')
+        suffix = path.lstrip('/')
+        if base.endswith('/api'):
+            return f'{base}/{suffix}'
+        return f'{base}/api/{suffix}'
+
+    @staticmethod
+    def _normalize_cloud_model_name(model_name: str) -> str:
+        if model_name.endswith(':cloud'):
+            return model_name[:-6]
+        if model_name.endswith('-cloud'):
+            return model_name[:-6]
+        return model_name
+
+    @classmethod
+    def _is_cloud_model_name(cls, model_name: str) -> bool:
+        model_name = str(model_name).strip().lower()
+        return model_name.endswith(':cloud') or model_name.endswith('-cloud')
+
+    def _resolve_ollama_target(self, model) -> dict:
+        if isinstance(model, dict):
+            route = str(model.get('route', 'local')).lower()
+            request_model = model.get('request_model') or model.get('name') or ''
+            display_name = model.get('display_name') or model.get('name') or request_model
+        else:
+            display_name = str(model)
+            route = 'cloud' if self._is_cloud_model_name(display_name) else 'local'
+            request_model = (
+                self._normalize_cloud_model_name(display_name)
+                if route == 'cloud'
+                else display_name
+            )
+
+        base_url = self.ollama_cloud_url if route == 'cloud' else self.ollama_url
+        headers = self._ollama_headers(self.ollama_api_key if route == 'cloud' else '')
+
+        return {
+            'route': route,
+            'request_model': request_model,
+            'display_name': display_name,
+            'base_url': base_url,
+            'headers': headers,
+        }
     
     def _start_ollama_if_needed(self):
         """Start Ollama serve process if using bundled Ollama"""
@@ -160,11 +219,17 @@ class UnifiedBackend:
         try:
             # Use provided history, or wrap the bare prompt as a single user turn
             chat_messages = messages if messages else [{"role": "user", "content": prompt}]
+            target = self._resolve_ollama_target(model)
+            request_start = time.time()
+            first_token_time = None
+            full_response = ""
+            final_chunk = None
 
             response = requests.post(
-                f'{self.ollama_url}/api/chat',
+                self._ollama_api_url(target['base_url'], 'chat'),
+                headers=target['headers'],
                 json={
-                    "model": model,
+                    "model": target['request_model'],
                     "messages": chat_messages,
                     "stream": True,
                     "options": {
@@ -181,16 +246,74 @@ class UnifiedBackend:
                 if line:
                     try:
                         data = json.loads(line)
+                        if data.get('done', False):
+                            final_chunk = data
+                            continue
                         if not data.get('done', False):
                             # /api/chat returns tokens under message.content
                             token = data.get('message', {}).get('content', '')
                             if token:
+                                if first_token_time is None:
+                                    first_token_time = time.time()
+                                full_response += token
                                 if callback:
                                     callback(token)
                                 yield token
                     except json.JSONDecodeError:
                         continue
 
+            request_end = time.time()
+            prompt_seconds = None
+            generation_seconds = None
+            if first_token_time is not None:
+                prompt_seconds = max(1e-9, first_token_time - request_start)
+                generation_seconds = max(1e-9, request_end - first_token_time)
+            else:
+                prompt_seconds = max(1e-9, request_end - request_start)
+
+            prompt_tokens = None
+            completion_tokens = None
+            if isinstance(final_chunk, dict):
+                prompt_tokens = final_chunk.get("prompt_eval_count") or final_chunk.get("prompt_tokens")
+                completion_tokens = final_chunk.get("eval_count") or final_chunk.get("completion_tokens")
+                prompt_eval_duration = final_chunk.get("prompt_eval_duration")
+                eval_duration = final_chunk.get("eval_duration")
+                # Ollama reports nanoseconds for these durations.
+                if prompt_eval_duration:
+                    prompt_seconds = max(1e-9, prompt_eval_duration / 1_000_000_000)
+                if eval_duration:
+                    generation_seconds = max(1e-9, eval_duration / 1_000_000_000)
+
+            if prompt_tokens is None:
+                prompt_chars = sum(len(m.get("content", "")) for m in chat_messages)
+                prompt_tokens = max(1, prompt_chars // 4)
+            if completion_tokens is None:
+                completion_tokens = max(1, len(full_response) // 4)
+
+            prompt_tps = None
+            generation_tps = None
+            if prompt_seconds and prompt_tokens:
+                prompt_tps = prompt_tokens / prompt_seconds
+            if generation_seconds and completion_tokens:
+                generation_tps = completion_tokens / generation_seconds
+
+            self.last_generation_stats = {
+                "prompt_tps": prompt_tps,
+                "generation_tps": generation_tps,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            }
+
+        except requests.exceptions.HTTPError as e:
+            status_code = e.response.status_code if e.response is not None else None
+            if status_code == 401:
+                if 'signin_url' in (e.response.text if e.response is not None else ''):
+                    raise RuntimeError(
+                        "Ollama Cloud authorization required for this model. "
+                        "Set your Ollama API key in Settings or choose a local model."
+                    )
+                raise RuntimeError("Ollama API error: 401 Unauthorized.")
+            raise RuntimeError(f"Ollama API error: {e}")
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"Ollama API error: {e}")
     
@@ -280,6 +403,8 @@ class UnifiedBackend:
         if self.backend_type == BackendType.LOCAL and hasattr(self, "local_wrapper"):
             if hasattr(self.local_wrapper, "get_last_generation_stats"):
                 return self.local_wrapper.get_last_generation_stats()
+        if self.backend_type == BackendType.OLLAMA:
+            return dict(self.last_generation_stats)
         return {}
     
     def stop_generation(self):
@@ -310,12 +435,22 @@ class UnifiedBackend:
                     self.ollama_process.wait()
                 print("✅ Ollama stopped")
             self.ollama_process = None
+
+    def preload_model(self, model_path: str) -> bool:
+        """Preload/warm a local llama.cpp model server."""
+        if self.backend_type == BackendType.LOCAL and hasattr(self, "local_wrapper"):
+            return self.local_wrapper.preload_model(model_path)
+        return False
     
     @staticmethod
-    def get_ollama_models(ollama_url: str = 'http://localhost:11434') -> list:
+    def get_ollama_models(ollama_url: str = 'http://localhost:11434', api_key: str = '') -> list:
         """Get list of available Ollama models"""
         try:
-            response = requests.get(f'{ollama_url}/api/tags', timeout=5)
+            response = requests.get(
+                UnifiedBackend._ollama_api_url(ollama_url, 'tags'),
+                headers=UnifiedBackend._ollama_headers(api_key),
+                timeout=5
+            )
             response.raise_for_status()
             data = response.json()
             return [m['name'] for m in data.get('models', [])]
@@ -324,11 +459,15 @@ class UnifiedBackend:
             return []
     
     @staticmethod
-    def test_ollama_connection(ollama_url: str = 'http://localhost:11434') -> bool:
+    def test_ollama_connection(ollama_url: str = 'http://localhost:11434', api_key: str = '') -> bool:
         """Test if Ollama is running and accessible"""
         try:
-            response = requests.get(f'{ollama_url}/api/tags', timeout=2)
-            return response.status_code == 200
+            response = requests.get(
+                UnifiedBackend._ollama_api_url(ollama_url, 'tags'),
+                headers=UnifiedBackend._ollama_headers(api_key),
+                timeout=2
+            )
+            return response.status_code in {200, 401}
         except:
             return False
     

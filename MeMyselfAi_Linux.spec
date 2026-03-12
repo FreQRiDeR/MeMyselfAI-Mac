@@ -2,7 +2,6 @@
 # MeMyselfAi_Linux.spec - PyInstaller configuration for Linux (Ubuntu)
 
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 block_cipher = None
 
@@ -35,69 +34,35 @@ for icon_candidate in ("MeMyselfAi.png", "./MeMyselfAi.png"):
         data_files.append((str(icon_obj), "."))
         break
 
-# Bundle binaries - Linux executable names as committed in this repo.
+# Bundle binaries from backend/bin/linux.
 binaries = []
 
-llama_binary_path = Path("backend/bin/llama-server")
-if llama_binary_path.exists():
-    # Place where LlamaWrapper currently searches in frozen mode.
-    binaries.append((str(llama_binary_path), "llama"))
-    print(f"✅ Found llama-server at: {llama_binary_path}")
-else:
-    print(f"⚠️  WARNING: llama-server not found at: {llama_binary_path}")
+backend_bin_dir = Path("backend/bin/linux")
+if not backend_bin_linux
+-dir.exists():
+    raise SystemExit("Missing backend/bin/linux directory; cannot bundle backend binaries.")
 
-ollama_binary_path = Path("backend/bin/ollama")
-if ollama_binary_path.exists():
-    # Place where UnifiedBackend._find_bundled_ollama() currently searches.
-    binaries.append((str(ollama_binary_path), "backend/bin"))
-    print(f"✅ Found ollama at: {ollama_binary_path}")
-else:
-    print(f"⚠️  WARNING: ollama not found at: {ollama_binary_path}")
+backend_bin_files = sorted(p for p in backend_bin_dir.iterdir() if p.is_file())
+if not backend_bin_files:
+    raise SystemExit("backend/bin is empty; cannot bundle backend binaries.")
 
-# Collect networking deps used by requests, including optional charset/chardet backends.
-extra_datas = []
-extra_binaries = []
-extra_hiddenimports = []
-for pkg_name in (
-    "requests",
-    "urllib3",
-    "idna",
-    "certifi",
-    "charset_normalizer",
-    "chardet",
-):
-    try:
-        d, b, h = collect_all(pkg_name)
-        extra_datas.extend(d)
-        extra_binaries.extend(b)
-        extra_hiddenimports.extend(h)
-    except Exception as exc:
-        print(f"⚠️  WARNING: collect_all({pkg_name}) failed: {exc}")
-
-try:
-    extra_hiddenimports.extend(collect_submodules("charset_normalizer"))
-except Exception as exc:
-    print(f"⚠️  WARNING: collect_submodules(charset_normalizer) failed: {exc}")
-
+for src in backend_bin_files:
+    # Put EVERYTHING under backend/bin/linux so llama-server and its .so deps are co-located.
+    binaries.append((str(src), "backend/bin/linux"))
+    print(f"✅ Found {src.name} at: {src}")
 
 a = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=binaries + extra_binaries,
-    datas=backend_files + ui_files + data_files + extra_datas,
-    hiddenimports=list(dict.fromkeys([
+    binaries=binaries,
+    datas=backend_files + ui_files + data_files,
+    hiddenimports=[
         "PyQt6",
         "PyQt6.QtCore",
         "PyQt6.QtGui",
         "PyQt6.QtWidgets",
         "PyQt6.sip",
-        "chardet",
-        "charset_normalizer",
-        "charset_normalizer.api",
-        "charset_normalizer.md",
-        "charset_normalizer.cd",
-        "requests",
-    ] + extra_hiddenimports)),
+    ],
     hookspath=[],
     hooksconfig={
         "PyQt6": {

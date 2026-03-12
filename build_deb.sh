@@ -62,6 +62,33 @@ if [[ ! -d "$DIST_DIR/$APP_NAME" ]]; then
   exit 1
 fi
 
+echo "Validating bundled backend/bin artifacts..."
+missing_bins=()
+bundle_roots=("$DIST_DIR/$APP_NAME" "$DIST_DIR/$APP_NAME/_internal")
+while IFS= read -r -d '' src; do
+  name="$(basename "$src")"
+  expected_rel="backend/bin/$name"
+  found=false
+  for root in "${bundle_roots[@]}"; do
+    if [[ -f "$root/$expected_rel" ]]; then
+      found=true
+      break
+    fi
+  done
+  if [[ "$found" == "false" ]]; then
+    missing_bins+=("$DIST_DIR/$APP_NAME/$expected_rel")
+  fi
+done < <(find "$ROOT_DIR/backend/bin" -maxdepth 1 -type f -print0)
+
+
+if (( ${#missing_bins[@]} > 0 )); then
+  echo "Missing bundled backend/bin files:"
+  for m in "${missing_bins[@]}"; do
+    echo "  - $m"
+  done
+  exit 1
+fi
+
 echo "Staging package filesystem..."
 mkdir -p "$APP_INSTALL_DIR" "$DEBIAN_DIR" "$STAGE_DIR/usr/bin"
 cp -a "$DIST_DIR/$APP_NAME/." "$APP_INSTALL_DIR/"
@@ -88,7 +115,7 @@ Section: utils
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: MeMyselfAI Team <noreply@memyselfai.local>
-Depends: libglib2.0-0, libx11-6, libx11-xcb1, libxcb1, libxkbcommon-x11-0, libxcb-cursor0, libfontconfig1, libdbus-1-3, libgl1
+Depends:
 Description: MeMyselfAI desktop app
  Local AI chat desktop application built with PyQt6 and bundled runtime.
 EOF
@@ -133,4 +160,4 @@ echo "Done:"
 echo "  $OUTPUT_DEB"
 echo ""
 echo "Install with:"
-echo "  sudo apt install ./$OUTPUT_DEB"
+echo "  sudo apt install $OUTPUT_DEB"

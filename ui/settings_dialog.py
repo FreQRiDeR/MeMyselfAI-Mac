@@ -172,6 +172,14 @@ class SettingsDialog(QDialog):
             }
         """)
         paths_layout.addRow(self.ollama_label, self.ollama_url_input)
+
+        self.ollama_api_key_label = QLabel("Ollama Cloud API Key:")
+        self.ollama_api_key_input = QLineEdit()
+        self.ollama_api_key_input.setPlaceholderText("Used for direct https://ollama.com/api cloud access")
+        self.ollama_api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.ollama_api_key_input.setStyleSheet(self.ollama_url_input.styleSheet())
+        self.ollama_api_key_input.setToolTip("Required for direct Ollama Cloud models; not used for localhost")
+        paths_layout.addRow(self.ollama_api_key_label, self.ollama_api_key_input)
         
         # HuggingFace API Key (for HF backend)
         self.hf_label = QLabel("HF API Key:")
@@ -640,6 +648,7 @@ class SettingsDialog(QDialog):
         self.ollama_path_input.setText(self.config.get("ollama_path", ""))
         self.llama_path_input.setText(self.config.get("llama_cpp_path", ""))
         self.ollama_url_input.setText(self.config.get("ollama_url", "http://localhost:11434"))
+        self.ollama_api_key_input.setText(self.config.get("ollama_api_key", ""))
         self.hf_api_key_input.setText(self.config.get("hf_api_key", ""))
         self.max_tokens_input.setValue(self.config.get("max_tokens", 512))
         self.temperature_input.setValue(self.config.get("temperature", 0.7))
@@ -703,6 +712,8 @@ class SettingsDialog(QDialog):
         is_ollama = backend == "ollama"
         self.ollama_label.setVisible(is_ollama)
         self.ollama_url_input.setVisible(is_ollama)
+        self.ollama_api_key_label.setVisible(is_ollama)
+        self.ollama_api_key_input.setVisible(is_ollama)
 
     def browse_ollama_path(self):
         """Browse for Ollama binary"""
@@ -783,13 +794,14 @@ class SettingsDialog(QDialog):
         
         elif backend == "ollama":
             ollama_url = self.ollama_url_input.text().strip()
+            ollama_api_key = self.ollama_api_key_input.text().strip()
             if not ollama_url:
                 QMessageBox.warning(self, "Invalid Settings", "Please specify Ollama URL")
                 return False
             
             # Test connection
             from backend.unified_backend import UnifiedBackend
-            if not UnifiedBackend.test_ollama_connection(ollama_url):
+            if not UnifiedBackend.test_ollama_connection(ollama_url, ollama_api_key):
                 reply = QMessageBox.question(
                     self,
                     "Ollama Not Running",
@@ -823,6 +835,7 @@ class SettingsDialog(QDialog):
         self.config.set("backend_type", self.backend_combo.currentData())
         self.config.set("llama_cpp_path", self.llama_path_input.text().strip())
         self.config.set("ollama_url", self.ollama_url_input.text().strip())
+        self.config.set("ollama_api_key", self.ollama_api_key_input.text().strip())
         self.config.set("hf_api_key", self.hf_api_key_input.text().strip())
         self.config.set("max_tokens", self.max_tokens_input.value())
         self.config.set("temperature", self.temperature_input.value())

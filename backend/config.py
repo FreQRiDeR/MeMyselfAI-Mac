@@ -20,6 +20,7 @@ class Config:
         "llama_cpp_path": "bundled" if _is_bundled else "",
         "ollama_path": "bundled" if _is_bundled else "",  # Add this line
         "ollama_url": "http://localhost:11434",
+        "ollama_api_key": "",
         "hf_api_key": "",
         "default_model": "",
         "max_tokens": 512,
