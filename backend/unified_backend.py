@@ -1,6 +1,6 @@
 """
 unified_backend.py
-Unified backend supporting Local llama.cpp, Ollama, and HuggingFace
+Unified backend supporting local llama.cpp, remote llama-server, Ollama, and HuggingFace
 """
 
 import sys
@@ -17,6 +17,7 @@ from backend.process_utils import background_process_kwargs
 class BackendType(Enum):
     """Available backend types"""
     LOCAL = "local"           # Local llama.cpp
+    LLAMA_SERVER = "llama_server"  # HTTP + SSE
     OLLAMA = "ollama"         # Ollama API (local or remote)
     HUGGINGFACE = "huggingface"  # HuggingFace Inference API
 
@@ -34,6 +35,7 @@ class UnifiedBackend:
             backend_type: Type of backend to use
             **config: Backend-specific configuration
                 For LOCAL: llama_cpp_path
+                For LLAMA_SERVER: llama_server_url, llama_server_api_key
                 For OLLAMA: ollama_url (default: http://localhost:11434), ollama_path
                 For HUGGINGFACE: api_key
         """
@@ -42,12 +44,16 @@ class UnifiedBackend:
         self.inference_timeout = int(config.get('inference_timeout', 300))
         self.ollama_process = None  # To track Ollama process
         self.last_generation_stats = {}
+        self._active_response = None
         
         # Initialize backend-specific components
         if backend_type == BackendType.LOCAL:
             from backend.llama_wrapper import LlamaWrapper
             llama_path = config.get('llama_cpp_path', 'bundled')
             self.local_wrapper = LlamaWrapper(llama_path, tuning=config)
+        elif backend_type == BackendType.LLAMA_SERVER:
+            self.llama_server_url = config.get('llama_server_url', 'http://localhost:8080')
+            self.llama_server_api_key = str(config.get('llama_server_api_key', '')).strip()
         elif backend_type == BackendType.OLLAMA:
             self.ollama_url = config.get('ollama_url', 'http://localhost:11434')
             self.ollama_path = config.get('ollama_path', 'bundled')
@@ -74,6 +80,30 @@ class UnifiedBackend:
         if base.endswith('/api'):
             return f'{base}/{suffix}'
         return f'{base}/api/{suffix}'
+
+    @staticmethod
+    def _llama_server_headers(api_key: str = "") -> dict:
+        headers = {}
+        api_key = str(api_key).strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        return headers
+
+    @classmethod
+    def _llama_server_base_url(cls, base_url: str) -> str:
+        base = str(base_url).strip().rstrip('/')
+        for suffix in ('/v1/chat/completions', '/v1/completions', '/v1', '/health'):
+            if base.endswith(suffix):
+                return base[:-len(suffix)].rstrip('/')
+        return base
+
+    @classmethod
+    def _llama_server_chat_url(cls, base_url: str) -> str:
+        return f"{cls._llama_server_base_url(base_url)}/v1/chat/completions"
+
+    @classmethod
+    def _llama_server_health_url(cls, base_url: str) -> str:
+        return f"{cls._llama_server_base_url(base_url)}/health"
 
     @staticmethod
     def _normalize_cloud_model_name(model_name: str) -> str:
@@ -192,6 +222,8 @@ class UnifiedBackend:
         """
         if self.backend_type == BackendType.LOCAL:
             yield from self._local_generate(model, prompt, max_tokens, temperature, callback, messages)
+        elif self.backend_type == BackendType.LLAMA_SERVER:
+            yield from self._llama_server_generate(model, prompt, max_tokens, temperature, callback, messages)
         elif self.backend_type == BackendType.OLLAMA:
             yield from self._ollama_generate(model, prompt, max_tokens, temperature, callback, messages)
         elif self.backend_type == BackendType.HUGGINGFACE:
@@ -210,6 +242,116 @@ class UnifiedBackend:
         yield from self.local_wrapper.generate_streaming(
             model_path, prompt, max_tokens, temperature, callback, messages
         )
+
+    def _llama_server_generate(
+        self,
+        model,
+        prompt: str,
+        max_tokens: int,
+        temperature: float,
+        callback: Optional[Callable[[str], None]],
+        messages: list = None
+    ) -> Generator[str, None, None]:
+        """Generate using a remote llama-server over HTTP + SSE."""
+        try:
+            request_start = time.time()
+            first_token_time = None
+            stream_usage = None
+            full_response = ""
+
+            chat_messages = messages if messages else [{"role": "user", "content": prompt}]
+            payload = {
+                "messages": chat_messages,
+                "stream": True,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "stream_options": {"include_usage": True},
+            }
+
+            response = requests.post(
+                self._llama_server_chat_url(self.llama_server_url),
+                headers=self._llama_server_headers(self.llama_server_api_key),
+                json=payload,
+                stream=True,
+                timeout=self.inference_timeout,
+            )
+            self._active_response = response
+            response.raise_for_status()
+
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                line_str = line.decode('utf-8') if isinstance(line, bytes) else str(line)
+                if not line_str.startswith('data: '):
+                    continue
+
+                data_str = line_str[6:]
+                if data_str.strip() == '[DONE]':
+                    break
+
+                try:
+                    chunk = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+
+                if isinstance(chunk, dict) and "usage" in chunk:
+                    stream_usage = chunk.get("usage") or stream_usage
+
+                choices = chunk.get('choices') or []
+                if not choices:
+                    continue
+
+                delta = choices[0].get('delta', {})
+                content = delta.get('content', '')
+                if not content:
+                    continue
+
+                if first_token_time is None:
+                    first_token_time = time.time()
+                full_response += content
+                if callback:
+                    callback(content)
+                yield content
+
+            request_end = time.time()
+            if first_token_time is not None:
+                prompt_seconds = max(1e-9, first_token_time - request_start)
+                generation_seconds = max(1e-9, request_end - first_token_time)
+            else:
+                prompt_seconds = max(1e-9, request_end - request_start)
+                generation_seconds = None
+
+            prompt_tokens = None
+            completion_tokens = None
+            if isinstance(stream_usage, dict):
+                prompt_tokens = stream_usage.get("prompt_tokens")
+                completion_tokens = stream_usage.get("completion_tokens")
+
+            if prompt_tokens is None:
+                prompt_chars = sum(len(str(m.get("content", ""))) for m in chat_messages)
+                prompt_tokens = max(1, prompt_chars // 4)
+            if completion_tokens is None:
+                completion_tokens = max(1, len(full_response) // 4)
+
+            prompt_tps = prompt_tokens / prompt_seconds if prompt_seconds and prompt_tokens else None
+            generation_tps = (
+                completion_tokens / generation_seconds
+                if generation_seconds and completion_tokens else None
+            )
+
+            self.last_generation_stats = {
+                "prompt_tps": prompt_tps,
+                "generation_tps": generation_tps,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            }
+        finally:
+            if self._active_response is not None:
+                try:
+                    self._active_response.close()
+                except Exception:
+                    pass
+                self._active_response = None
     
     def _ollama_generate(
         self,
@@ -245,6 +387,7 @@ class UnifiedBackend:
                 stream=True,
                 timeout=self.inference_timeout
             )
+            self._active_response = response
             response.raise_for_status()
 
             for line in response.iter_lines():
@@ -321,6 +464,13 @@ class UnifiedBackend:
             raise RuntimeError(f"Ollama API error: {e}")
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"Ollama API error: {e}")
+        finally:
+            if self._active_response is not None:
+                try:
+                    self._active_response.close()
+                except Exception:
+                    pass
+                self._active_response = None
     
     def _hf_generate(
         self,
@@ -408,7 +558,7 @@ class UnifiedBackend:
         if self.backend_type == BackendType.LOCAL and hasattr(self, "local_wrapper"):
             if hasattr(self.local_wrapper, "get_last_generation_stats"):
                 return self.local_wrapper.get_last_generation_stats()
-        if self.backend_type == BackendType.OLLAMA:
+        if self.backend_type in {BackendType.LLAMA_SERVER, BackendType.OLLAMA}:
             return dict(self.last_generation_stats)
         return {}
     
@@ -416,7 +566,14 @@ class UnifiedBackend:
         """Stop current generation"""
         if self.backend_type == BackendType.LOCAL:
             self.local_wrapper.stop_generation()
-        # Ollama and HF don't need explicit stopping (HTTP request ends)
+        elif self.backend_type in {BackendType.LLAMA_SERVER, BackendType.OLLAMA}:
+            if self._active_response is not None:
+                try:
+                    self._active_response.close()
+                except Exception:
+                    pass
+                self._active_response = None
+        # HF doesn't need explicit stopping (HTTP request ends)
     
     def cleanup(self):
         """Clean up backend resources"""
@@ -426,6 +583,13 @@ class UnifiedBackend:
                 self.local_wrapper.cleanup()
             except Exception as e:
                 print(f"⚠️  llama_wrapper cleanup error: {e}")
+
+        if self._active_response is not None:
+            try:
+                self._active_response.close()
+            except Exception:
+                pass
+            self._active_response = None
 
         # Clean up bundled Ollama process
         if self.ollama_process:
@@ -474,6 +638,19 @@ class UnifiedBackend:
             )
             return response.status_code in {200, 401}
         except:
+            return False
+
+    @staticmethod
+    def test_llama_server_connection(llama_server_url: str = 'http://localhost:8080', api_key: str = '') -> bool:
+        """Test if a llama-server endpoint is running and accessible."""
+        try:
+            response = requests.get(
+                UnifiedBackend._llama_server_health_url(llama_server_url),
+                headers=UnifiedBackend._llama_server_headers(api_key),
+                timeout=2,
+            )
+            return response.status_code in {200, 401}
+        except Exception:
             return False
     
     @staticmethod

@@ -15,6 +15,7 @@ import sys
 import base64
 import mimetypes
 from pathlib import Path
+from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -597,6 +598,13 @@ class MainWindow(QMainWindow):
                 self.config.get("llama_poll", 50),
                 self.config.get("llama_extra_args", ""),
             )
+        if backend_type_str == "llama_server":
+            return (
+                "llama_server",
+                self.config.get("llama_server_url", "http://localhost:8080"),
+                self.config.get("llama_server_api_key", ""),
+                self.config.get("inference_timeout", 300),
+            )
         if backend_type_str == "ollama":
             return (
                 "ollama",
@@ -636,6 +644,7 @@ class MainWindow(QMainWindow):
             current_type = getattr(self.backend, 'backend_type', None)
             target_type = {
                 "local": BackendType.LOCAL,
+                "llama_server": BackendType.LLAMA_SERVER,
                 "ollama": BackendType.OLLAMA, 
                 "huggingface": BackendType.HUGGINGFACE
             }.get(backend_type_str)
@@ -664,6 +673,18 @@ class MainWindow(QMainWindow):
                     self.backend = UnifiedBackend(BackendType.LOCAL, **self._local_backend_kwargs(llama_path))
                     self.status_bar.showMessage(f"✅ Local backend: {llama_path}")
                     self.refresh_models()
+
+                elif backend_type_str == "llama_server":
+                    llama_server_url = self.config.get("llama_server_url", "http://localhost:8080")
+                    llama_server_api_key = self.config.get("llama_server_api_key", "")
+                    self.backend = UnifiedBackend(
+                        BackendType.LLAMA_SERVER,
+                        llama_server_url=llama_server_url,
+                        llama_server_api_key=llama_server_api_key,
+                        inference_timeout=self.config.get("inference_timeout", 300),
+                    )
+                    self.status_bar.showMessage(f"✅ Remote llama-server backend: {llama_server_url}")
+                    self.refresh_llama_server_models()
 
                 elif backend_type_str == "ollama":
                     ollama_url = self.config.get("ollama_url", "http://localhost:11434")
@@ -702,6 +723,10 @@ class MainWindow(QMainWindow):
                 llama_path = self.config.get_llama_cpp_path()
                 self.status_bar.showMessage(f"✅ Local backend: {llama_path}")
                 self.refresh_models()
+            elif backend_type_str == "llama_server":
+                llama_server_url = self.config.get("llama_server_url", "http://localhost:8080")
+                self.status_bar.showMessage(f"✅ Remote llama-server backend: {llama_server_url}")
+                self.refresh_llama_server_models()
             elif backend_type_str == "ollama":
                 ollama_url = self.config.get("ollama_url", "http://localhost:11434")
                 self.status_bar.showMessage(f"✅ Ollama backend: {ollama_url}")
@@ -724,6 +749,28 @@ class MainWindow(QMainWindow):
         for m in models:
             self.model_combo.addItem(f"{m.name} ({m.size_mb}MB)", m.path)
         self.status_bar.showMessage(f"Found {len(models)} model(s)")
+
+    def refresh_llama_server_models(self):
+        from backend.unified_backend import UnifiedBackend
+
+        llama_server_url = self.config.get("llama_server_url", "http://localhost:8080")
+        llama_server_api_key = self.config.get("llama_server_api_key", "")
+        parsed = urlparse(llama_server_url)
+        endpoint_label = parsed.netloc or parsed.path or llama_server_url
+        model_data = {
+            "display_name": f"Remote llama-server ({endpoint_label})",
+            "route": "remote_llama_server",
+        }
+
+        self.model_combo.clear()
+        self.model_combo.addItem(f"🌐 {endpoint_label}", model_data)
+        self.model_combo.setCurrentIndex(0)
+        self.current_model = model_data
+
+        if UnifiedBackend.test_llama_server_connection(llama_server_url, llama_server_api_key):
+            self.status_bar.showMessage(f"Connected to remote llama-server: {endpoint_label}")
+        else:
+            self.status_bar.showMessage(f"⚠️  Remote llama-server not reachable: {endpoint_label}")
 
     def refresh_ollama_models(self):
         from backend.unified_backend import UnifiedBackend
@@ -962,7 +1009,7 @@ class MainWindow(QMainWindow):
                             attachment_sections[-1] = (
                                 f"[Image attached: {filename} (failed to load: {exc})]"
                             )
-                    elif self.backend.backend_type == BackendType.LOCAL:
+                    elif self.backend.backend_type in {BackendType.LOCAL, BackendType.LLAMA_SERVER}:
                         try:
                             llama_image_urls.append(self._image_to_data_url(filepath))
                         except Exception as exc:
@@ -993,7 +1040,7 @@ class MainWindow(QMainWindow):
         user_message = {"role": "user", "content": full_prompt}
         if ollama_images and self.backend.backend_type == BackendType.OLLAMA:
             user_message["images"] = ollama_images
-        elif llama_image_urls and self.backend.backend_type == BackendType.LOCAL:
+        elif llama_image_urls and self.backend.backend_type in {BackendType.LOCAL, BackendType.LLAMA_SERVER}:
             content_parts = [{"type": "text", "text": full_prompt}]
             for image_url in llama_image_urls:
                 content_parts.append(
@@ -1155,6 +1202,12 @@ class MainWindow(QMainWindow):
             )
             dialog.exec()
             self.refresh_ollama_models()
+        elif backend_type == "llama_server":
+            QMessageBox.information(
+                self,
+                "Remote llama-server",
+                "This backend connects to a server that already has its model loaded.\n\nUse Settings to change the remote endpoint."
+            )
         else:
             from ui.model_manager_dialog import ModelManagerDialog
             dialog = ModelManagerDialog(self)

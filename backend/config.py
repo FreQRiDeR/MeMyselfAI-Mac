@@ -14,10 +14,23 @@ class Config:
     
     # Detect if running from PyInstaller bundle
     _is_bundled = getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')
+    _BACKEND_TYPE_ALIASES = {
+        "local": "local",
+        "llama_server": "llama_server",
+        "llama-server": "llama_server",
+        "remote server": "llama_server",
+        "remote_server": "llama_server",
+        "remoteserver": "llama_server",
+        "remote sse": "llama_server",
+        "ollama": "ollama",
+        "huggingface": "huggingface",
+    }
     
     DEFAULT_CONFIG = {
-        "backend_type": "local",  # local, ollama, or huggingface
+        "backend_type": "local",  # local, llama_server, ollama, or huggingface
         "llama_cpp_path": "bundled" if _is_bundled else "",
+        "llama_server_url": "http://localhost:8080",
+        "llama_server_api_key": "",
         "ollama_path": "bundled" if _is_bundled else "",  # Add this line
         "ollama_url": "http://localhost:11434",
         "ollama_api_key": "",
@@ -75,6 +88,10 @@ class Config:
                 with open(self.config_file, 'r') as f:
                     loaded = json.load(f)
                     self.config.update(loaded)
+                normalized_backend = self._normalize_backend_type(self.config.get("backend_type"))
+                if normalized_backend != self.config.get("backend_type"):
+                    self.config["backend_type"] = normalized_backend
+                    self.save()
                 print(f"✅ [Config] Loaded from {self.config_file}")
             except Exception as e:
                 print(f"⚠️  [Config] Failed to load: {e}")
@@ -94,12 +111,23 @@ class Config:
     
     def get(self, key: str, default=None):
         """Get configuration value"""
-        return self.config.get(key, default)
+        value = self.config.get(key, default)
+        if key == "backend_type":
+            return self._normalize_backend_type(value)
+        return value
     
     def set(self, key: str, value):
         """Set configuration value and save"""
+        if key == "backend_type":
+            value = self._normalize_backend_type(value)
         self.config[key] = value
         self.save()
+
+    @classmethod
+    def _normalize_backend_type(cls, value) -> str:
+        normalized = str(value or "local").strip().lower().replace("-", "_")
+        normalized = " ".join(normalized.split())
+        return cls._BACKEND_TYPE_ALIASES.get(normalized, normalized)
     
     def get_llama_cpp_path(self) -> Optional[str]:
         """Get llama.cpp binary path"""
@@ -123,10 +151,12 @@ class Config:
     
     def is_configured(self) -> bool:
         """Check if app is properly configured"""
-        # For local backend, need llama.cpp path; for Ollama, need Ollama path
+        # For local backend, need llama.cpp path; for remote llama-server, need URL; for Ollama, need Ollama path
         backend_type = self.config.get("backend_type", "local")
         if backend_type == "local":
             return self.get_llama_cpp_path() is not None
+        elif backend_type == "llama_server":
+            return bool(str(self.config.get("llama_server_url", "")).strip())
         elif backend_type == "ollama":
             return self.get_ollama_path() is not None
         else:  # huggingface

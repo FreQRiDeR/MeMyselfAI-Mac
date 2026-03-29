@@ -72,6 +72,7 @@ class SettingsDialog(QDialog):
             }
         """)
         self.backend_combo.addItem("Local (llama.cpp)", "local")
+        self.backend_combo.addItem("Remote SERVER (HTTP + SSE)", "llama_server")
         self.backend_combo.addItem("Ollama (Local API)", "ollama")
         self.backend_combo.addItem("HuggingFace (Cloud)", "huggingface")
         self.backend_combo.currentIndexChanged.connect(self.on_backend_changed)
@@ -114,6 +115,20 @@ class SettingsDialog(QDialog):
         llama_layout.addWidget(self.browse_llama_btn)
         
         paths_layout.addRow(self.llama_label, llama_layout)
+
+        # Remote llama-server URL (for HTTP + SSE backend)
+        self.llama_server_label = QLabel("Server URL:")
+        self.llama_server_url_input = QLineEdit()
+        self.llama_server_url_input.setPlaceholderText("http://hostname:8080")
+        self.llama_server_url_input.setStyleSheet(self.llama_path_input.styleSheet())
+        paths_layout.addRow(self.llama_server_label, self.llama_server_url_input)
+
+        self.llama_server_api_key_label = QLabel("Bearer Token:")
+        self.llama_server_api_key_input = QLineEdit()
+        self.llama_server_api_key_input.setPlaceholderText("Optional")
+        self.llama_server_api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.llama_server_api_key_input.setStyleSheet(self.llama_path_input.styleSheet())
+        paths_layout.addRow(self.llama_server_api_key_label, self.llama_server_api_key_input)
 
         # Ollama path (for ollama backend)
         self.ollama_binary_label = QLabel("Ollama Binary:")
@@ -647,6 +662,8 @@ class SettingsDialog(QDialog):
 
         self.ollama_path_input.setText(self.config.get("ollama_path", ""))
         self.llama_path_input.setText(self.config.get("llama_cpp_path", ""))
+        self.llama_server_url_input.setText(self.config.get("llama_server_url", "http://localhost:8080"))
+        self.llama_server_api_key_input.setText(self.config.get("llama_server_api_key", ""))
         self.ollama_url_input.setText(self.config.get("ollama_url", "http://localhost:11434"))
         self.ollama_api_key_input.setText(self.config.get("ollama_api_key", ""))
         self.hf_api_key_input.setText(self.config.get("hf_api_key", ""))
@@ -695,25 +712,35 @@ class SettingsDialog(QDialog):
     def on_backend_changed(self):
         """Handle backend type change - show/hide relevant fields"""
         backend = self.backend_combo.currentData()
-        # Show/hide Ollama binary fields
-        is_ollama = backend == "ollama"
-        self.ollama_binary_label.setVisible(is_ollama)
-        self.ollama_path_input.setVisible(is_ollama)
-        self.browse_ollama_btn.setVisible(is_ollama)
-        
-        # Show/hide llama.cpp fields
         is_local = backend == "local"
+        is_llama_server = backend == "llama_server"
+        is_ollama = backend == "ollama"
+        is_hf = backend == "huggingface"
+
+        # Show/hide llama.cpp fields
         self.llama_label.setVisible(is_local)
         self.llama_path_input.setVisible(is_local)
         self.browse_llama_btn.setVisible(is_local)
         self.local_tuning_group.setVisible(is_local)
+
+        # Show/hide remote llama-server fields
+        self.llama_server_label.setVisible(is_llama_server)
+        self.llama_server_url_input.setVisible(is_llama_server)
+        self.llama_server_api_key_label.setVisible(is_llama_server)
+        self.llama_server_api_key_input.setVisible(is_llama_server)
         
         # Show/hide Ollama fields
-        is_ollama = backend == "ollama"
+        self.ollama_binary_label.setVisible(is_ollama)
+        self.ollama_path_input.setVisible(is_ollama)
+        self.browse_ollama_btn.setVisible(is_ollama)
         self.ollama_label.setVisible(is_ollama)
         self.ollama_url_input.setVisible(is_ollama)
         self.ollama_api_key_label.setVisible(is_ollama)
         self.ollama_api_key_input.setVisible(is_ollama)
+
+        # Show/hide HuggingFace fields
+        self.hf_label.setVisible(is_hf)
+        self.hf_api_key_input.setVisible(is_hf)
 
     def browse_ollama_path(self):
         """Browse for Ollama binary"""
@@ -792,6 +819,24 @@ class SettingsDialog(QDialog):
                     )
                     return False
         
+        elif backend == "llama_server":
+            llama_server_url = self.llama_server_url_input.text().strip()
+            llama_server_api_key = self.llama_server_api_key_input.text().strip()
+            if not llama_server_url:
+                QMessageBox.warning(self, "Invalid Settings", "Please specify server URL")
+                return False
+
+            from backend.unified_backend import UnifiedBackend
+            if not UnifiedBackend.test_llama_server_connection(llama_server_url, llama_server_api_key):
+                reply = QMessageBox.question(
+                    self,
+                    "Server Not Reachable",
+                    f"Cannot connect to server at {llama_server_url}\n\nSave anyway?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return False
+
         elif backend == "ollama":
             ollama_url = self.ollama_url_input.text().strip()
             ollama_api_key = self.ollama_api_key_input.text().strip()
@@ -834,6 +879,8 @@ class SettingsDialog(QDialog):
         # Save all settings
         self.config.set("backend_type", self.backend_combo.currentData())
         self.config.set("llama_cpp_path", self.llama_path_input.text().strip())
+        self.config.set("llama_server_url", self.llama_server_url_input.text().strip())
+        self.config.set("llama_server_api_key", self.llama_server_api_key_input.text().strip())
         self.config.set("ollama_url", self.ollama_url_input.text().strip())
         self.config.set("ollama_api_key", self.ollama_api_key_input.text().strip())
         self.config.set("hf_api_key", self.hf_api_key_input.text().strip())
