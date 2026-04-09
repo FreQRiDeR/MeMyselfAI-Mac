@@ -9,12 +9,13 @@ import re
 import requests
 import subprocess
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Generator, Optional, Callable
 from html import unescape
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 from backend.process_utils import background_process_kwargs
 
 
@@ -58,6 +59,7 @@ class UnifiedBackend:
         elif backend_type == BackendType.LLAMA_SERVER:
             self.llama_server_url = config.get('llama_server_url', 'http://localhost:8080')
             self.llama_server_api_key = str(config.get('llama_server_api_key', '')).strip()
+            self.llama_server_tool_protocol_supported = None  # None=unknown, True=supported, False=rejected
         elif backend_type == BackendType.OLLAMA:
             self.ollama_url = config.get('ollama_url', 'http://localhost:11434')
             self.ollama_path = config.get('ollama_path', 'bundled')
@@ -254,9 +256,48 @@ class UnifiedBackend:
     def _force_final_answer_instruction() -> str:
         return (
             "You already have internet search results. "
+            "Cross-check at least two distinct source URLs before stating factual claims. "
+            "For time-sensitive numbers (prices, rates, dates), do not guess. "
+            "Do not say 'as of my last update' or imply offline memory limitations. "
+            "Ground your answer in the provided web results only. "
+            "If internet_search indicates fallback_only=true, or there are no numeric signals/snippets, "
+            "you must NOT output a specific numeric value. "
+            "Instead, say verification is limited and provide source links only. "
+            "If sources conflict or evidence is weak, explicitly say so and report uncertainty. "
             "Provide the final answer now in plain text. "
             "Do not output <tool_call> tags or request more tools."
         )
+
+    @staticmethod
+    def _is_tool_protocol_fallback_error(exc: Exception) -> bool:
+        """Return True when the backend likely rejected tool-calling fields."""
+        if not isinstance(exc, requests.RequestException):
+            return False
+
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        if status in {400, 404, 405, 415, 422, 500, 501, 502, 503}:
+            return True
+
+        # Some proxies/backends surface parser issues without stable status mapping.
+        text = str(exc).lower()
+        if response is not None:
+            try:
+                text = f"{text} {response.text}".lower()
+            except Exception:
+                pass
+
+        hints = (
+            "tool",
+            "tools",
+            "tool_choice",
+            "unsupported",
+            "unknown field",
+            "unrecognized field",
+            "bad request",
+            "invalid request",
+        )
+        return any(token in text for token in hints)
 
     def _run_internet_tool(self, args: dict) -> dict:
         query = str((args or {}).get("query", "")).strip()
@@ -302,30 +343,192 @@ class UnifiedBackend:
         return str(content or "").strip()
 
     def _latest_user_query(self, chat_messages: list, prompt: str = "") -> str:
+        def sanitize_query(raw_text: str) -> str:
+            text = str(raw_text or "").strip()
+            if not text:
+                return ""
+
+            # Keep the natural-language user request and drop appended attachment payloads.
+            attachment_marker = "\n\n--- File:"
+            marker_idx = text.find(attachment_marker)
+            if marker_idx >= 0:
+                text = text[:marker_idx].strip()
+
+            cleaned_lines = []
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("[Image attached:"):
+                    continue
+                cleaned_lines.append(line)
+
+            text = re.sub(r"\s+", " ", "\n".join(cleaned_lines)).strip()
+            return text[:400]
+
         for msg in reversed(chat_messages or []):
             if str(msg.get("role", "")).lower() != "user":
                 continue
             text = self._extract_text_content(msg.get("content", ""))
             if text:
-                return text
-        return str(prompt or "").strip()
+                sanitized = sanitize_query(text)
+                if sanitized:
+                    return sanitized
+
+        return sanitize_query(str(prompt or "").strip())
+
+    @staticmethod
+    def _query_variants(query: str) -> list:
+        base = str(query or "").strip()
+        if not base:
+            return []
+
+        variants = [base]
+
+        # Minimal typo corrections for frequently misspelled high-salience entities.
+        typo_map = {
+            "artimis": "artemis",
+        }
+
+        def apply_typo_map(text: str) -> str:
+            tokens = re.split(r"(\W+)", text)
+            out = []
+            for token in tokens:
+                key = token.lower()
+                if key in typo_map:
+                    replacement = typo_map[key]
+                    if token.isupper():
+                        replacement = replacement.upper()
+                    elif token.istitle():
+                        replacement = replacement.title()
+                    out.append(replacement)
+                else:
+                    out.append(token)
+            return "".join(out).strip()
+
+        corrected = apply_typo_map(base)
+        if corrected and corrected != base:
+            variants.append(corrected)
+
+        normalized = re.sub(r"[^\w\s:/.-]", " ", base)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        if normalized and normalized not in variants:
+            variants.append(normalized)
+
+        # Date-focused rewrite for "when" queries to increase retrieval precision.
+        when_match = re.match(r"^\s*when\s+(?:was|is|did|does)?\s*(.+)$", base, flags=re.IGNORECASE)
+        if when_match:
+            subject = when_match.group(1).strip(" ?.")
+            if subject:
+                variants.append(f"{subject} date")
+                variants.append(f"latest {subject} date")
+                variants.append(f"{subject} official date")
+
+        # Generic freshness/source variants.
+        variants.append(f"{base} latest")
+        variants.append(f"{base} official source")
+        if corrected and corrected != base:
+            variants.append(f"{corrected} latest")
+            variants.append(f"{corrected} official source")
+
+        deduped = []
+        seen = set()
+        for item in variants:
+            cleaned = re.sub(r"\s+", " ", str(item or "")).strip()
+            key = cleaned.lower()
+            if not cleaned or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(cleaned)
+
+        return deduped[:7]
 
     @staticmethod
     def _should_force_web_search(query: str) -> bool:
         text = str(query or "").strip().lower()
         if not text:
             return False
+
+        # Skip obvious small-talk turns when internet mode is enabled.
+        if text in {"hi", "hello", "hey", "thanks", "thank you", "ok", "okay", "cool"}:
+            return False
+
         triggers = (
             "internet", "web", "search", "browse", "look up", "lookup",
             "latest", "current", "today", "verify", "fact-check", "fact check",
             "check your results", "news",
         )
-        return any(token in text for token in triggers)
+        if any(token in text for token in triggers):
+            return True
+
+        # Internet mode should generally run a lookup for substantive user queries
+        # even without explicit trigger words.
+        if "?" in text:
+            return True
+        if len(text.split()) >= 3:
+            return True
+        return False
+
+    @staticmethod
+    def _is_google_query_link(url: str) -> bool:
+        parsed = urlparse(str(url or "").strip())
+        host = parsed.netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host != "google.com" or parsed.path != "/search":
+            return False
+        params = parse_qs(parsed.query, keep_blank_values=False)
+        return bool(params.get("q"))
+
+    @classmethod
+    def _is_low_confidence_web_sources(cls, web_sources: list) -> bool:
+        urls = [
+            str(item.get("url", "")).strip()
+            for item in (web_sources or [])
+            if isinstance(item, dict)
+        ]
+        urls = [u for u in urls if u]
+        if not urls:
+            return False
+        return all(cls._is_google_query_link(url) for url in urls)
+
+    @staticmethod
+    def _is_time_sensitive_numeric_query(query: str) -> bool:
+        text = str(query or "").strip().lower()
+        if not text:
+            return False
+        numeric_markers = (
+            "price", "quote", "rate", "value", "cost", "how much", "trading at",
+            "per ounce", "xau", "gold", "silver", "platinum", "oil",
+            "btc", "bitcoin", "eth", "ethereum", "stock", "index",
+            "current", "latest", "today", "now", "usd", "$",
+        )
+        return any(marker in text for marker in numeric_markers)
+
+    @staticmethod
+    def _build_limited_verification_response(query: str, web_sources: list) -> str:
+        lines = [
+            "I couldn't verify a reliable live numeric value from the currently retrieved sources.",
+            "The available links are search pages (not directly parsed quote pages), so I won't guess a number.",
+            "Please open at least two of these sources and confirm the latest timestamped quote:",
+        ]
+        for idx, source in enumerate((web_sources or [])[:3], start=1):
+            if not isinstance(source, dict):
+                continue
+            title = str(source.get("title", "")).strip() or f"Source {idx}"
+            url = str(source.get("url", "")).strip()
+            if not url:
+                continue
+            lines.append(f"{idx}. {title}")
+            lines.append(f"   {url}")
+        if query:
+            lines.append(f"Query reviewed: {query}")
+        return "\n".join(lines)
 
     def _build_web_context_message(self, tool_result: dict) -> str:
         query = str((tool_result or {}).get("query", "")).strip()
         fetched_at = str((tool_result or {}).get("fetched_at", "")).strip()
         results = (tool_result or {}).get("results", []) or []
+        signals = (tool_result or {}).get("signals", []) or []
+        fallback_only = bool((tool_result or {}).get("fallback_only"))
         error = str((tool_result or {}).get("error", "")).strip()
         lines = [
             "INTERNET_SEARCH_RESULTS (auto-fetched by app):",
@@ -333,21 +536,45 @@ class UnifiedBackend:
         ]
         if fetched_at:
             lines.append(f"Fetched at: {fetched_at}")
+        if fallback_only:
+            lines.append("Verification confidence: LOW (fallback search links only).")
         if results:
             lines.append("Top results:")
-            for idx, entry in enumerate(results[:5], start=1):
+            for idx, entry in enumerate(results[:4], start=1):
                 title = str(entry.get("title", "")).strip() or "(untitled)"
                 url = str(entry.get("url", "")).strip() or "(no url)"
                 snippet = str(entry.get("snippet", "")).strip()
                 lines.append(f"{idx}. {title}")
                 lines.append(f"   URL: {url}")
                 if snippet:
-                    lines.append(f"   Snippet: {snippet[:320]}")
+                    lines.append(f"   Snippet: {snippet[:140]}")
+        if signals:
+            lines.append("Numeric signals extracted from snippets:")
+            for idx, signal in enumerate(signals[:4], start=1):
+                value = str(signal.get("value", "")).strip() or "(unknown)"
+                url = str(signal.get("url", "")).strip() or "(no url)"
+                context = str(signal.get("context", "")).strip()
+                lines.append(f"{idx}. Value: {value}")
+                lines.append(f"   URL: {url}")
+                if context:
+                    lines.append(f"   Context: {context[:120]}")
         elif error:
             lines.append(f"Search error: {error}")
+            if "fallback query links" in error.lower():
+                lines.append(
+                    "IMPORTANT: No parseable source values were extracted. "
+                    "Do not output a precise numeric claim."
+                )
+        if fallback_only and not signals:
+            lines.append(
+                "MANDATORY: Do not provide a specific number in your answer for this query. "
+                "State that verification is limited and cite links."
+            )
 
         lines.append(
-            "Use these web results in your next answer. If citing facts, include source URLs."
+            "Use these web results in your next answer. "
+            "Cite at least two distinct source URLs for time-sensitive claims when available. "
+            "If fewer than two usable sources exist, explicitly state that verification is limited."
         )
         return "\n".join(lines)
 
@@ -367,12 +594,17 @@ class UnifiedBackend:
             return chat_messages, web_results_used, list(web_sources or [])
 
         tool_result = self._internet_search(query=query, max_results=5)
+        has_results = bool((tool_result or {}).get("results"))
+        has_error = bool(str((tool_result or {}).get("error", "")).strip())
+        if not has_results and not has_error:
+            return chat_messages, web_results_used, list(web_sources or [])
+
         context_msg = self._build_web_context_message(tool_result)
         updated_messages = list(chat_messages)
         updated_messages.append({"role": "system", "content": context_msg})
         merged_sources = self._merge_web_sources(web_sources or [], tool_result, limit=5)
 
-        if (tool_result.get("results") or []):
+        if has_results:
             web_results_used += 1
         return updated_messages, web_results_used, merged_sources
 
@@ -387,16 +619,54 @@ class UnifiedBackend:
                 "error": "Empty query"
             }
 
-        headers = {"User-Agent": "MeMyselfAI/1.0"}
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        }
         results = []
         errors = []
         seen_urls = set()
+        fallback_only = False
+        google_challenge_detected = False
 
-        def add_result(title: str, url: str, snippet: str):
+        def canonical_host(url: str) -> str:
+            parsed_url = urlparse(str(url or ""))
+            host = parsed_url.netloc.lower()
+            if host.startswith("www."):
+                host = host[4:]
+            return host
+
+        def is_blocked_url(url: str) -> bool:
+            parsed_url = urlparse(str(url or ""))
+            host = canonical_host(url)
+            if parsed_url.scheme not in {"http", "https"}:
+                return True
+            if not host:
+                return True
+            blocked_hosts = {
+                "google.com",
+                "webcache.googleusercontent.com",
+                "gstatic.com",
+                "accounts.google.com",
+                "support.google.com",
+                "policies.google.com",
+                "maps.google.com",
+                "youtube.com",
+                "youtu.be",
+            }
+            return host in blocked_hosts or host.endswith(".google.com")
+
+        def add_result(title: str, url: str, snippet: str, allow_google: bool = False):
             if len(results) >= max_results:
                 return
             clean_url = str(url or "").strip()
             if not clean_url or clean_url in seen_urls:
+                return
+            if is_blocked_url(clean_url) and not allow_google:
                 return
             seen_urls.add(clean_url)
             results.append({
@@ -405,88 +675,346 @@ class UnifiedBackend:
                 "snippet": str(snippet or "").strip()[:500]
             })
 
-        def add_duck_topics(items):
-            if not isinstance(items, list):
+        def looks_like_google_challenge(html: str) -> bool:
+            text = str(html or "").lower()
+            if not text:
+                return False
+            markers = (
+                "enablejs",
+                "window.sgs",
+                "sg_ss",
+                "sorry/index",
+                "unusual traffic from your computer network",
+                "recaptcha",
+                "captcha",
+            )
+            return any(marker in text for marker in markers)
+
+        def clean_html_text(raw_html: str) -> str:
+            text = re.sub(r"<[^>]+>", "", str(raw_html or ""))
+            text = unescape(text)
+            text = re.sub(r"\s+", " ", text).strip()
+            return text
+
+        def diversify_results(entries: list, limit: int) -> list:
+            unique_host_results = []
+            overflow = []
+            seen_hosts = set()
+
+            for entry in entries:
+                if len(unique_host_results) >= limit:
+                    break
+                host = canonical_host(entry.get("url", ""))
+                if host and host not in seen_hosts:
+                    seen_hosts.add(host)
+                    unique_host_results.append(entry)
+                else:
+                    overflow.append(entry)
+
+            for entry in overflow:
+                if len(unique_host_results) >= limit:
+                    break
+                unique_host_results.append(entry)
+
+            return unique_host_results[:limit]
+
+        def extract_numeric_signals(entries: list) -> list:
+            # Pull candidate price/quantity tokens from snippets to reduce blind guessing.
+            pattern = re.compile(
+                r"(?:USD|US\$|\$)\s?\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d{1,3}(?:,\d{3})*(?:\.\d+)?\s?(?:USD|dollars?)",
+                re.IGNORECASE,
+            )
+            signals = []
+            seen = set()
+            for entry in entries:
+                source_url = str(entry.get("url", "")).strip()
+                text = f"{entry.get('title', '')} {entry.get('snippet', '')}"
+                for match in pattern.finditer(text):
+                    value = match.group(0).strip()
+                    key = (value.lower(), source_url)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    window_start = max(0, match.start() - 30)
+                    window_end = min(len(text), match.end() + 30)
+                    context = re.sub(r"\s+", " ", text[window_start:window_end]).strip()
+                    signals.append({"value": value, "url": source_url, "context": context})
+                    if len(signals) >= 8:
+                        return signals
+            return signals
+
+        def parse_google_html(html: str):
+            if not html:
                 return
-            for item in items:
+
+            proxy_link_patterns = [
+                re.compile(r'href="/url\?([^"]+)"'),
+                re.compile(r"href='/url\?([^']+)'"),
+            ]
+            direct_link_patterns = [
+                re.compile(r'href="(https?://[^"#]+)"'),
+                re.compile(r"href='(https?://[^'#]+)'"),
+            ]
+            title_patterns = [
+                re.compile(r"<h3[^>]*>(.*?)</h3>", re.IGNORECASE | re.DOTALL),
+                re.compile(r'aria-label="([^"]+)"', re.IGNORECASE | re.DOTALL),
+                re.compile(r">([^<]{12,140})</a>", re.IGNORECASE | re.DOTALL),
+            ]
+            snippet_patterns = [
+                re.compile(
+                    r'<div[^>]+class="[^"]*(?:VwiC3b|yXK7lf|s3v9rd)[^"]*"[^>]*>(.*?)</div>',
+                    re.IGNORECASE | re.DOTALL,
+                ),
+                re.compile(
+                    r'<div[^>]+class="[^"]*(?:ITZIwc|BNeawe s3v9rd AP7Wnd)[^"]*"[^>]*>(.*?)</div>',
+                    re.IGNORECASE | re.DOTALL,
+                ),
+                re.compile(r"<span[^>]*>(.*?)</span>", re.IGNORECASE | re.DOTALL),
+            ]
+
+            def parse_match(match, is_proxy: bool):
                 if len(results) >= max_results:
                     return
-                if not isinstance(item, dict):
-                    continue
-                nested = item.get("Topics")
-                if isinstance(nested, list):
-                    add_duck_topics(nested)
-                text = str(item.get("Text", "")).strip()
-                url = str(item.get("FirstURL", "")).strip()
-                if not text or not url:
-                    continue
-                title = text.split(" - ", 1)[0]
-                add_result(title, url, text)
 
-        try:
-            response = requests.get(
-                "https://api.duckduckgo.com/",
-                params={
-                    "q": query,
-                    "format": "json",
-                    "no_html": 1,
-                    "no_redirect": 1,
-                    "skip_disambig": 1,
-                },
-                headers=headers,
-                timeout=min(12, self.inference_timeout),
-            )
-            response.raise_for_status()
-            payload = response.json()
-            abstract = str(payload.get("AbstractText", "")).strip()
-            if abstract:
-                heading = str(payload.get("Heading", "")).strip() or query
-                abstract_url = str(payload.get("AbstractURL", "")).strip()
-                if abstract_url:
-                    add_result(heading, abstract_url, abstract)
-            add_duck_topics(payload.get("RelatedTopics", []))
-        except Exception as exc:
-            errors.append(f"DuckDuckGo: {exc}")
+                if is_proxy:
+                    query_string = unescape(match.group(1)).replace("&amp;", "&")
+                    parsed_query = parse_qs(query_string, keep_blank_values=False)
+                    raw_url = (parsed_query.get("q") or parsed_query.get("url") or [None])[0]
+                    if not raw_url:
+                        return
+                    url = unquote(raw_url).strip()
+                else:
+                    url = unescape(match.group(1)).strip()
 
-        # Fallback source for broader recall when DDG Instant has sparse results.
-        if len(results) < max_results:
-            try:
-                remaining = max_results - len(results)
-                response = requests.get(
-                    "https://en.wikipedia.org/w/api.php",
-                    params={
-                        "action": "query",
-                        "list": "search",
-                        "srsearch": query,
-                        "srlimit": remaining,
-                        "utf8": 1,
-                        "format": "json",
-                    },
-                    headers=headers,
-                    timeout=min(12, self.inference_timeout),
-                )
-                response.raise_for_status()
-                wiki_payload = response.json()
-                for entry in wiki_payload.get("query", {}).get("search", []):
-                    title = str(entry.get("title", "")).strip()
-                    if not title:
+                if is_blocked_url(url):
+                    return
+
+                start = max(0, match.start() - 450)
+                end = min(len(html), match.end() + 3800)
+                segment = html[start:end]
+
+                title = ""
+                for title_pattern in title_patterns:
+                    title_match = title_pattern.search(segment)
+                    if not title_match:
                         continue
-                    snippet_html = str(entry.get("snippet", ""))
-                    snippet = unescape(re.sub(r"<[^>]+>", "", snippet_html))
-                    url = f"https://en.wikipedia.org/wiki/{quote(title.replace(' ', '_'))}"
-                    add_result(title, url, snippet)
-            except Exception as exc:
-                errors.append(f"Wikipedia: {exc}")
+                    title = clean_html_text(title_match.group(1))
+                    if title:
+                        break
+                if not title:
+                    parsed = urlparse(url)
+                    title = f"{canonical_host(url)} {parsed.path[:40]}".strip()
+
+                snippet = ""
+                for pattern in snippet_patterns:
+                    snippet_match = pattern.search(segment)
+                    if not snippet_match:
+                        continue
+                    snippet = clean_html_text(snippet_match.group(1))
+                    if snippet:
+                        break
+
+                add_result(title, url, snippet)
+
+            for pattern in proxy_link_patterns:
+                for match in pattern.finditer(html):
+                    parse_match(match, is_proxy=True)
+                    if len(results) >= max_results:
+                        return
+
+            for pattern in direct_link_patterns:
+                for match in pattern.finditer(html):
+                    parse_match(match, is_proxy=False)
+                    if len(results) >= max_results:
+                        return
+
+        def resolve_google_news_item_url(item_url: str, source_url: str = "") -> str:
+            candidate = str(item_url or "").strip()
+            source_candidate = str(source_url or "").strip()
+
+            if candidate and not is_blocked_url(candidate):
+                return candidate
+
+            if candidate:
+                try:
+                    resolved = requests.get(
+                        candidate,
+                        headers=headers,
+                        allow_redirects=True,
+                        timeout=min(8, self.inference_timeout),
+                    )
+                    resolved.raise_for_status()
+                    final_url = str(resolved.url or "").strip()
+                    if final_url and not is_blocked_url(final_url):
+                        return final_url
+                except Exception as exc:
+                    errors.append(f"Google News link resolve failed: {exc}")
+
+            if source_candidate and not is_blocked_url(source_candidate):
+                return source_candidate
+            return candidate
+
+        def parse_google_news_rss(xml_text: str):
+            if not xml_text:
+                return
+            try:
+                root = ET.fromstring(xml_text)
+            except ET.ParseError as exc:
+                errors.append(f"Google News RSS parse failed: {exc}")
+                return
+
+            for item in root.findall("./channel/item"):
+                if len(results) >= max_results:
+                    break
+
+                title = str(item.findtext("title", "")).strip()
+                link = str(item.findtext("link", "")).strip()
+                description = clean_html_text(item.findtext("description", ""))
+                pub_date = str(item.findtext("pubDate", "")).strip()
+                source_elem = item.find("source")
+                source_name = ""
+                source_url = ""
+                if source_elem is not None:
+                    source_name = str(source_elem.text or "").strip()
+                    source_url = str(source_elem.get("url") or "").strip()
+
+                resolved_url = resolve_google_news_item_url(link, source_url=source_url)
+                if not resolved_url:
+                    continue
+
+                if source_name and source_name.lower() not in title.lower():
+                    result_title = f"{title} ({source_name})" if title else source_name
+                else:
+                    result_title = title
+
+                snippet_parts = []
+                if description:
+                    snippet_parts.append(description)
+                if pub_date:
+                    snippet_parts.append(f"Published: {pub_date}")
+                snippet = " | ".join(snippet_parts)
+
+                add_result(result_title or resolved_url, resolved_url, snippet)
+
+        query_variants = self._query_variants(query)
+
+        attempt_modes = [
+            {"safe": "off"},
+            {"gbv": "1"},  # Basic HTML fallback
+        ]
+
+        for variant in query_variants:
+            if len(results) >= max_results:
+                break
+            for mode in attempt_modes:
+                if len(results) >= max_results:
+                    break
+                params = {
+                    "q": variant,
+                    "num": max(max_results, 6),
+                    "hl": "en",
+                    "gl": "us",
+                    "pws": "0",
+                    **mode,
+                }
+                try:
+                    response = requests.get(
+                        "https://www.google.com/search",
+                        params=params,
+                        headers=headers,
+                        timeout=min(9, self.inference_timeout),
+                    )
+                    response.raise_for_status()
+                    html = response.text
+                    if looks_like_google_challenge(html):
+                        google_challenge_detected = True
+                        errors.append(
+                            "Google search HTML returned anti-bot/challenge page; "
+                            "switching to Google RSS fallback."
+                        )
+                        continue
+                    parse_google_html(html)
+                except Exception as exc:
+                    errors.append(f"Google ({variant[:80]}): {exc}")
+
+        if len(results) < max_results:
+            for variant in query_variants:
+                if len(results) >= max_results:
+                    break
+                try:
+                    response = requests.get(
+                        "https://news.google.com/rss/search",
+                        params={
+                            "q": variant,
+                            "hl": "en-US",
+                            "gl": "US",
+                            "ceid": "US:en",
+                        },
+                        headers=headers,
+                        timeout=min(9, self.inference_timeout),
+                    )
+                    response.raise_for_status()
+                    before = len(results)
+                    parse_google_news_rss(response.text)
+                    if len(results) == before:
+                        errors.append(
+                            f"Google News RSS ({variant[:80]}): no parseable items."
+                        )
+                except Exception as exc:
+                    errors.append(f"Google News RSS ({variant[:80]}): {exc}")
+
+        if not results and not errors:
+            errors.append(
+                "Google: no parseable search results returned "
+                "(possibly blocked or response format changed)."
+            )
+
+        real_results_count = len(results)
+        if not results:
+            fallback_only = True
+            fallback_queries = [
+                query,
+                f"{query} site:reuters.com",
+                f"{query} site:bloomberg.com",
+                f"{query} site:marketwatch.com",
+            ]
+            for q in fallback_queries:
+                if len(results) >= max_results:
+                    break
+                add_result(
+                    f"Google search results for: {q[:120]}",
+                    f"https://www.google.com/search?q={quote_plus(q)}",
+                    "Open this Google results page and verify using multiple publisher sources.",
+                    allow_google=True,
+                )
+
+        diversified = diversify_results(results, limit=max_results)
+        signals = extract_numeric_signals(diversified if real_results_count > 0 else [])
 
         result_payload = {
             "query": query,
             "fetched_at": datetime.now(timezone.utc).isoformat(),
-            "results": results[:max_results],
+            "results": diversified[:max_results],
+            "signals": signals[:8],
+            "fallback_only": bool(fallback_only),
         }
-        if errors and not results:
-            result_payload["error"] = " | ".join(errors)
+        if errors and real_results_count == 0 and fallback_only:
+            result_payload["warnings"] = list(dict.fromkeys(errors))[:4]
+            if google_challenge_detected:
+                result_payload["error"] = (
+                    "Google search was blocked by an anti-bot/challenge response and "
+                    "Google News RSS did not provide enough parseable publisher links; "
+                    "using fallback query links. Open at least two sources before trusting numeric claims."
+                )
+            else:
+                result_payload["error"] = (
+                    "Google returned no parseable organic results; using fallback query links. "
+                    "Open at least two sources before trusting numeric claims."
+                )
+        elif errors and real_results_count == 0:
+            result_payload["error"] = " | ".join(list(dict.fromkeys(errors))[:4])
         elif errors:
-            result_payload["warnings"] = errors
+            result_payload["warnings"] = list(dict.fromkeys(errors))[:4]
         return result_payload
 
     def _resolve_llama_server_internet_tools(
@@ -501,21 +1029,35 @@ class UnifiedBackend:
         web_results_used = 0
         web_sources = []
 
+        if getattr(self, "llama_server_tool_protocol_supported", None) is False:
+            return resolved_messages, web_results_used, web_sources
+
         for _ in range(max_rounds):
-            response = requests.post(
-                self._llama_server_chat_url(self.llama_server_url),
-                headers=self._llama_server_headers(self.llama_server_api_key),
-                json={
-                    "messages": resolved_messages,
-                    "stream": False,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "tools": tool_spec,
-                    "tool_choice": "auto",
-                },
-                timeout=self.inference_timeout,
-            )
-            response.raise_for_status()
+            try:
+                response = requests.post(
+                    self._llama_server_chat_url(self.llama_server_url),
+                    headers=self._llama_server_headers(self.llama_server_api_key),
+                    json={
+                        "messages": resolved_messages,
+                        "stream": False,
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                        "tools": tool_spec,
+                        "tool_choice": "auto",
+                    },
+                    timeout=self.inference_timeout,
+                )
+                response.raise_for_status()
+                self.llama_server_tool_protocol_supported = True
+            except requests.RequestException as exc:
+                if self._is_tool_protocol_fallback_error(exc):
+                    self.llama_server_tool_protocol_supported = False
+                    print(
+                        "⚠️  llama-server rejected tool-calling payload; "
+                        "falling back to non-tool generation."
+                    )
+                    break
+                raise
             payload = response.json()
             choices = payload.get("choices") or []
             if not choices:
@@ -542,8 +1084,9 @@ class UnifiedBackend:
 
                 if tool_name == "internet_search":
                     tool_result = self._run_internet_tool(tool_args)
-                    web_results_used += 1
                     web_sources = self._merge_web_sources(web_sources, tool_result, limit=5)
+                    if (tool_result.get("results") or []):
+                        web_results_used += 1
                 else:
                     tool_result = {"error": f"Unsupported tool: {tool_name}"}
 
@@ -615,8 +1158,9 @@ class UnifiedBackend:
 
                 if tool_name == "internet_search":
                     tool_result = self._run_internet_tool(tool_args)
-                    web_results_used += 1
                     web_sources = self._merge_web_sources(web_sources, tool_result, limit=5)
+                    if (tool_result.get("results") or []):
+                        web_results_used += 1
                 else:
                     tool_result = {"error": f"Unsupported tool: {tool_name}"}
 
@@ -750,6 +1294,27 @@ class UnifiedBackend:
                 web_results_used=0,
                 web_sources=[],
             )
+        latest_query = self._latest_user_query(chat_messages, prompt=prompt)
+        if (
+            internet_enabled
+            and forced_web_results_used > 0
+            and self._is_time_sensitive_numeric_query(latest_query)
+            and self._is_low_confidence_web_sources(forced_web_sources)
+        ):
+            guarded_text = self._build_limited_verification_response(latest_query, forced_web_sources)
+            if callback:
+                callback(guarded_text)
+            yield guarded_text
+            if hasattr(self.local_wrapper, "last_generation_stats"):
+                self.local_wrapper.last_generation_stats = {
+                    "prompt_tps": None,
+                    "generation_tps": None,
+                    "prompt_tokens": max(1, sum(self._message_content_length(m.get("content", "")) for m in chat_messages) // 4),
+                    "completion_tokens": max(1, len(guarded_text) // 4),
+                    "web_results_used": forced_web_results_used,
+                    "web_sources": forced_web_sources[:5],
+                }
+            return
 
         tools = [self._internet_tool_spec()] if internet_enabled else None
         yield from self.local_wrapper.generate_streaming(
@@ -804,6 +1369,26 @@ class UnifiedBackend:
                 web_results_used=web_results_used,
                 web_sources=web_sources,
             )
+            latest_query = self._latest_user_query(chat_messages, prompt=prompt)
+            if (
+                internet_enabled
+                and web_results_used > 0
+                and self._is_time_sensitive_numeric_query(latest_query)
+                and self._is_low_confidence_web_sources(web_sources)
+            ):
+                guarded_text = self._build_limited_verification_response(latest_query, web_sources)
+                if callback:
+                    callback(guarded_text)
+                yield guarded_text
+                self.last_generation_stats = {
+                    "prompt_tps": None,
+                    "generation_tps": None,
+                    "prompt_tokens": max(1, sum(self._message_content_length(m.get("content", "")) for m in chat_messages) // 4),
+                    "completion_tokens": max(1, len(guarded_text) // 4),
+                    "web_results_used": web_results_used,
+                    "web_sources": web_sources[:5],
+                }
+                return
             payload = {
                 "messages": chat_messages,
                 "stream": True,
@@ -929,6 +1514,26 @@ class UnifiedBackend:
                 web_results_used=web_results_used,
                 web_sources=web_sources,
             )
+            latest_query = self._latest_user_query(chat_messages, prompt=prompt)
+            if (
+                internet_enabled
+                and web_results_used > 0
+                and self._is_time_sensitive_numeric_query(latest_query)
+                and self._is_low_confidence_web_sources(web_sources)
+            ):
+                guarded_text = self._build_limited_verification_response(latest_query, web_sources)
+                if callback:
+                    callback(guarded_text)
+                yield guarded_text
+                self.last_generation_stats = {
+                    "prompt_tps": None,
+                    "generation_tps": None,
+                    "prompt_tokens": max(1, sum(self._message_content_length(m.get("content", "")) for m in chat_messages) // 4),
+                    "completion_tokens": max(1, len(guarded_text) // 4),
+                    "web_results_used": web_results_used,
+                    "web_sources": web_sources[:5],
+                }
+                return
             request_start = time.time()
             first_token_time = None
             full_response = ""

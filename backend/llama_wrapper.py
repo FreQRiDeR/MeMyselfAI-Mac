@@ -172,6 +172,7 @@ class LlamaWrapper:
         self.current_model: Optional[str] = None
         self.server_ready = False
         self.last_generation_stats = {}
+        self.tool_protocol_supported = None  # None=unknown, True=supported, False=rejected
         
         if not self.llama_cpp_path.exists():
             raise FileNotFoundError(f"llama-server not found at: {self.llama_cpp_path}")
@@ -303,6 +304,7 @@ class LlamaWrapper:
         
         self.current_model = model_path
         self.server_ready = False
+        self.tool_protocol_supported = None
         
         # Wait for server to be ready
         if self._wait_for_server_ready():
@@ -672,15 +674,21 @@ class LlamaWrapper:
                 )
 
             if tools and callable(tool_executor):
-                chat_messages, web_results_used, web_sources = self._resolve_tool_calls(
-                    url=url,
-                    chat_messages=chat_messages,
-                    max_tokens=effective_max_tokens,
-                    temperature=temperature,
-                    tools=tools,
-                    tool_executor=tool_executor,
-                    max_rounds=max_tool_rounds,
-                )
+                if self.tool_protocol_supported is False:
+                    print(
+                        f"ℹ️  [LlamaWrapper #{self.instance_id}] "
+                        "Skipping tool protocol (previously rejected by current server)."
+                    )
+                else:
+                    chat_messages, web_results_used, web_sources = self._resolve_tool_calls(
+                        url=url,
+                        chat_messages=chat_messages,
+                        max_tokens=effective_max_tokens,
+                        temperature=temperature,
+                        tools=tools,
+                        tool_executor=tool_executor,
+                        max_rounds=max_tool_rounds,
+                    )
 
             payload = {
                 "messages": chat_messages,
@@ -868,6 +876,36 @@ class LlamaWrapper:
 
         return merged[:limit]
 
+    @staticmethod
+    def _is_tool_protocol_fallback_error(exc: Exception) -> bool:
+        """Return True when llama-server likely rejected tool-calling fields."""
+        if not isinstance(exc, requests.RequestException):
+            return False
+
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        if status in {400, 404, 405, 415, 422, 500, 501, 502, 503}:
+            return True
+
+        text = str(exc).lower()
+        if response is not None:
+            try:
+                text = f"{text} {response.text}".lower()
+            except Exception:
+                pass
+
+        hints = (
+            "tool",
+            "tools",
+            "tool_choice",
+            "unsupported",
+            "unknown field",
+            "unrecognized field",
+            "bad request",
+            "invalid request",
+        )
+        return any(token in text for token in hints)
+
     def _resolve_tool_calls(
         self,
         url: str,
@@ -883,19 +921,31 @@ class LlamaWrapper:
         web_sources = []
 
         for _ in range(max(1, int(max_rounds))):
-            response = requests.post(
-                url,
-                json={
-                    "messages": resolved_messages,
-                    "stream": False,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "tools": tools,
-                    "tool_choice": "auto",
-                },
-                timeout=self.request_timeout,
-            )
-            response.raise_for_status()
+            try:
+                response = requests.post(
+                    url,
+                    json={
+                        "messages": resolved_messages,
+                        "stream": False,
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                        "tools": tools,
+                        "tool_choice": "auto",
+                    },
+                    timeout=self.request_timeout,
+                )
+                response.raise_for_status()
+                self.tool_protocol_supported = True
+            except requests.RequestException as exc:
+                if self._is_tool_protocol_fallback_error(exc):
+                    self.tool_protocol_supported = False
+                    print(
+                        f"⚠️  [LlamaWrapper #{self.instance_id}] "
+                        "llama-server rejected tool-calling payload; "
+                        "continuing without tool protocol."
+                    )
+                    break
+                raise
             payload = response.json()
             choices = payload.get("choices") or []
             if not choices:
@@ -922,8 +972,9 @@ class LlamaWrapper:
                 tool_args = self._parse_tool_arguments(function_payload.get("arguments"))
                 tool_result = tool_executor(tool_args)
                 if tool_name == "internet_search":
-                    web_results_used += 1
                     web_sources = self._merge_web_sources(web_sources, tool_result, limit=5)
+                    if (tool_result.get("results") or []):
+                        web_results_used += 1
 
                 tool_message = {
                     "role": "tool",
@@ -1048,24 +1099,62 @@ class LlamaWrapper:
         budget_tokens = max(256, context_size - max_tokens)
         budget_chars = budget_tokens * 4
 
-        trimmed = []
-        start_idx = 0
+        leading_system = None
+        body = list(messages)
         if messages[0].get("role") == "system":
-            trimmed.append(messages[0])
-            start_idx = 1
-            budget_chars -= self._content_length(messages[0].get("content", ""))
+            leading_system = messages[0]
+            body = list(messages[1:])
+            budget_chars -= self._content_length(leading_system.get("content", ""))
 
-        for msg in reversed(messages[start_idx:]):
+        budget_chars = max(0, budget_chars)
+        trimmed_reversed = []
+        kept_user_turn = False
+
+        for idx, msg in enumerate(reversed(body)):
             content = msg.get("content", "")
+            role = str(msg.get("role", "")).lower()
             cost = self._content_length(content)
-            if budget_chars - cost < 0:
-                break
-            trimmed.append(msg)
-            budget_chars -= cost
 
-        if start_idx == 1:
-            return [messages[0]] + list(reversed(trimmed[1:]))
-        return list(reversed(trimmed))
+            if cost <= budget_chars:
+                trimmed_reversed.append(msg)
+                budget_chars -= cost
+                if role == "user":
+                    kept_user_turn = True
+                continue
+
+            # Keep at least part of the newest message instead of dropping all context.
+            if idx == 0 and not trimmed_reversed:
+                truncated = dict(msg)
+                if isinstance(content, str):
+                    keep_chars = max(200, min(len(content), max(200, budget_chars)))
+                    truncated["content"] = content[:keep_chars]
+                    trimmed_reversed.append(truncated)
+                    budget_chars = 0
+                    if role == "user":
+                        kept_user_turn = True
+                elif role == "user":
+                    # Non-string (multimodal) user messages are kept whole.
+                    trimmed_reversed.append(msg)
+                    kept_user_turn = True
+                continue
+
+            # Skip oversized older messages; keep scanning for shorter useful context.
+            continue
+
+        if not kept_user_turn:
+            for msg in reversed(body):
+                if str(msg.get("role", "")).lower() == "user":
+                    content = msg.get("content", "")
+                    if isinstance(content, str):
+                        trimmed_reversed.append({**msg, "content": content[:max(200, min(len(content), 1200))]})
+                    else:
+                        trimmed_reversed.append(msg)
+                    break
+
+        trimmed = list(reversed(trimmed_reversed))
+        if leading_system is not None:
+            return [leading_system] + trimmed
+        return trimmed
     
     def cleanup(self):
         """Clean up resources — called by UnifiedBackend on backend switch or app quit"""
